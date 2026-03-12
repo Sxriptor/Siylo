@@ -4,6 +4,11 @@ const config = loadConfig();
 
 const state = {
   isConnected: false,
+  discord: {
+    status: "stopped",
+    botTag: "",
+    lastError: ""
+  },
   config,
   sessions: [],
   logs: [
@@ -33,27 +38,19 @@ function appendLog(level, message) {
 function getStateSnapshot() {
   return {
     isConnected: state.isConnected,
+    discord: state.discord,
     config: state.config,
     sessions: state.sessions,
     logs: state.logs
   };
 }
 
-function startAgent() {
-  if (!state.isConnected) {
-    state.isConnected = true;
-    appendLog("info", "Discord connection activated.");
-  }
-
-  return getStateSnapshot();
-}
-
-function stopAgent() {
-  if (state.isConnected) {
-    state.isConnected = false;
-    appendLog("info", "Discord connection stopped.");
-  }
-
+function setDiscordState(partialState) {
+  state.discord = {
+    ...state.discord,
+    ...partialState
+  };
+  state.isConnected = state.discord.status === "connected";
   return getStateSnapshot();
 }
 
@@ -70,9 +67,18 @@ function updateConfig(partialConfig) {
   return getStateSnapshot();
 }
 
+function addSession(session) {
+  const nextSession = {
+    ...session,
+    id: session.id || `cmd-${state.sessions.length + 1}`,
+    createdAt: session.createdAt || new Date().toISOString()
+  };
+  state.sessions = [nextSession, ...state.sessions].slice(0, 10);
+  return nextSession;
+}
+
 function simulateSession(commandText) {
   const sessionId = `cmd-${state.sessions.length + 1}`;
-
   const session = {
     id: sessionId,
     shell: "cmd",
@@ -87,10 +93,10 @@ function simulateSession(commandText) {
 }
 
 module.exports = {
+  addSession,
   appendLog,
   getStateSnapshot,
-  startAgent,
-  stopAgent,
+  setDiscordState,
   updateConfig,
   simulateSession
 };

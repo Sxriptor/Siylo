@@ -11,6 +11,11 @@ const levelTone: Record<string, string> = {
 
 const browserFallbackState: SiyloState = {
   isConnected: false,
+  discord: {
+    status: "stopped",
+    botTag: "",
+    lastError: ""
+  },
   config: {
     botToken: "",
     authorizedUsers: ["123456789012345678", "987654321098765432"],
@@ -24,7 +29,7 @@ const browserFallbackState: SiyloState = {
       shell: "cmd",
       status: "idle",
       lastCommand: "npm run dev",
-      createdAt: new Date().toISOString()
+      createdAt: "2026-03-12T00:00:00.000Z"
     }
   ],
   logs: [
@@ -32,33 +37,40 @@ const browserFallbackState: SiyloState = {
       id: "browser-preview",
       level: "info",
       message: "Browser dashboard preview loaded without Electron runtime access.",
-      timestamp: new Date().toISOString()
+      timestamp: "2026-03-12T00:00:00.000Z"
     }
   ]
 };
 
 export function DashboardShell() {
   const [state, setState] = useState<SiyloState>(browserFallbackState);
+  const [isDesktop, setIsDesktop] = useState(false);
+  const [machineName, setMachineName] = useState("Local machine");
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
+  const [botTokenInput, setBotTokenInput] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
-  const isDesktop = typeof window !== "undefined" && Boolean(window.siylo);
 
   useEffect(() => {
-    if (!window.siylo) {
+    const siyloBridge = window.siylo;
+    const desktopRuntime = Boolean(siyloBridge);
+    setIsDesktop(desktopRuntime);
+    setMachineName(window.navigator.platform || "Local machine");
+
+    if (!siyloBridge) {
       setState(browserFallbackState);
       return;
     }
 
     let mounted = true;
 
-    window.siylo.getState().then((nextState) => {
+    siyloBridge.getState().then((nextState) => {
       if (mounted) {
         setState(nextState);
       }
     });
 
-    const unsubscribe = window.siylo.onStateChanged((nextState) => {
+    const unsubscribe = siyloBridge.onStateChanged((nextState) => {
       setState(nextState);
     });
 
@@ -70,6 +82,7 @@ export function DashboardShell() {
 
   useEffect(() => {
     setAuthorizedUsersInput(state.config.authorizedUsers.join("\n"));
+    setBotTokenInput(state.config.botToken);
   }, [state]);
 
   const commandExamples = useMemo(() => {
@@ -104,18 +117,29 @@ export function DashboardShell() {
         label: "Authorized users",
         value: String(state.config.authorizedUsers.length),
         hint: "Discord IDs allowed to control this machine."
+      },
+      {
+        label: "Discord bot token",
+        value: state.config.botToken ? "Stored" : "Missing",
+        hint: "Used to connect the local agent to the Discord gateway."
+      },
+      {
+        label: "Discord runtime",
+        value: state.discord.status,
+        hint: state.discord.botTag || state.discord.lastError || "No live Discord session yet."
       }
     ];
   }, [state]);
 
   const currentState = state;
   const agentState = currentState.isConnected ? "running" : "stopped";
-  const connectionLabel = currentState.isConnected ? "Connected" : "Disconnected";
+  const connectionLabel =
+    currentState.discord.status === "connected"
+      ? currentState.discord.botTag || "Connected"
+      : currentState.discord.status;
   const latestLog = currentState.logs[0]?.timestamp
     ? formatTimestamp(currentState.logs[0].timestamp)
     : "Awaiting activity";
-  const machineName =
-    typeof window !== "undefined" ? window.navigator.platform || "Local machine" : "Local machine";
 
   async function handleStartStop() {
     if (!window.siylo) {
@@ -132,7 +156,7 @@ export function DashboardShell() {
     setState(nextState);
   }
 
-  async function handleSaveUsers() {
+  async function handleSaveConfig() {
     if (!window.siylo) {
       return;
     }
@@ -141,6 +165,7 @@ export function DashboardShell() {
 
     try {
       const nextState = await window.siylo.updateConfig({
+        botToken: botTokenInput.trim(),
         authorizedUsers: authorizedUsersInput
           .split(/\r?\n/)
           .map((value) => value.trim())
@@ -225,9 +250,21 @@ export function DashboardShell() {
         </Panel>
 
         <Panel
-          title="Authorized users"
-          description="Only these Discord IDs can trigger actions on this machine."
+          title="Credentials and access"
+          description="Store the Discord bot token and allowed user IDs for this machine."
         >
+          <label className="fieldLabel" htmlFor="bot-token">
+            Discord bot token
+          </label>
+          <input
+            id="bot-token"
+            className="textInput"
+            type="password"
+            value={botTokenInput}
+            disabled={!isDesktop}
+            placeholder="Paste your Discord bot token"
+            onChange={(event) => setBotTokenInput(event.target.value)}
+          />
           <div className="pillWrap">
             {currentState.config.authorizedUsers.map((userId) => (
               <span key={userId} className="pill">
@@ -249,10 +286,10 @@ export function DashboardShell() {
           <div className="actionRow">
             <button
               className="actionButton"
-              onClick={handleSaveUsers}
+              onClick={handleSaveConfig}
               disabled={!isDesktop || isSaving}
             >
-              {isSaving ? "Saving..." : "Save users"}
+              {isSaving ? "Saving..." : "Save configuration"}
             </button>
           </div>
         </Panel>

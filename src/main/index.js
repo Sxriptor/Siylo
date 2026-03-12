@@ -12,10 +12,13 @@ const {
   appendLog,
   getStateSnapshot,
   simulateSession,
-  startAgent,
-  stopAgent,
   updateConfig
 } = require("./state");
+const {
+  initializeDiscordService,
+  startDiscord,
+  stopDiscord
+} = require("./discord-service");
 
 const isDev = process.env.NODE_ENV === "development";
 const rendererUrl = process.env.SIYLO_RENDERER_URL || "http://127.0.0.1:3000";
@@ -27,35 +30,49 @@ let tray = null;
 let mainWindow = null;
 
 function broadcastState() {
+  const snapshot = getStateSnapshot();
+
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send("siylo:state-changed", getStateSnapshot());
+    mainWindow.webContents.send("siylo:state-changed", snapshot);
   }
 
   if (tray) {
-    tray.setToolTip(`Siylo ${getStateSnapshot().isConnected ? "(Connected)" : "(Stopped)"}`);
+    const trayStatus = snapshot.isConnected
+      ? "Connected"
+      : snapshot.discord.status === "connecting"
+        ? "Connecting"
+        : snapshot.discord.status === "error"
+          ? "Error"
+          : "Stopped";
+    tray.setToolTip(`Siylo (${trayStatus})`);
     tray.setContextMenu(buildTrayMenu());
   }
 }
 
 function buildTrayMenu() {
   const snapshot = getStateSnapshot();
+  const canStart = !snapshot.isConnected && snapshot.discord.status !== "connecting";
 
   return Menu.buildFromTemplate([
     { label: "Siylo", enabled: false },
     { type: "separator" },
     {
-      label: snapshot.isConnected ? "Running" : "Start",
-      enabled: !snapshot.isConnected,
-      click: () => {
-        startAgent();
+      label: snapshot.isConnected
+        ? "Running"
+        : snapshot.discord.status === "connecting"
+          ? "Connecting..."
+          : "Start",
+      enabled: canStart,
+      click: async () => {
+        await startDiscord(getStateSnapshot().config);
         broadcastState();
       }
     },
     {
       label: "Stop",
-      enabled: snapshot.isConnected,
-      click: () => {
-        stopAgent();
+      enabled: snapshot.isConnected || snapshot.discord.status === "connecting",
+      click: async () => {
+        await stopDiscord();
         broadcastState();
       }
     },
@@ -144,13 +161,13 @@ function showWindow() {
 
 function registerIpc() {
   ipcMain.handle("siylo:get-state", () => getStateSnapshot());
-  ipcMain.handle("siylo:start", () => {
-    const snapshot = startAgent();
+  ipcMain.handle("siylo:start", async () => {
+    const snapshot = await startDiscord(getStateSnapshot().config);
     broadcastState();
     return snapshot;
   });
-  ipcMain.handle("siylo:stop", () => {
-    const snapshot = stopAgent();
+  ipcMain.handle("siylo:stop", async () => {
+    const snapshot = await stopDiscord();
     broadcastState();
     return snapshot;
   });
@@ -169,10 +186,24 @@ function registerIpc() {
 
 app.whenReady().then(() => {
   appendLog("info", "Electron shell ready.");
+  initializeDiscordService({
+    onStateChanged: broadcastState,
+    restartApp: () => {
+      app.relaunch();
+      app.exit(0);
+    }
+  });
   createMainWindow();
   createTray();
   registerIpc();
   broadcastState();
+
+  const snapshot = getStateSnapshot();
+  if (snapshot.config.autoConnect && snapshot.config.botToken) {
+    startDiscord(snapshot.config).then(() => {
+      broadcastState();
+    });
+  }
 });
 
 app.on("window-all-closed", (event) => {
@@ -181,6 +212,7 @@ app.on("window-all-closed", (event) => {
 
 app.on("before-quit", () => {
   app.isQuiting = true;
+  stopDiscord();
 });
 
 app.on("activate", () => {

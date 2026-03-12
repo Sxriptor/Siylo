@@ -21,8 +21,15 @@ export type SiyloLogEntry = {
   timestamp: string;
 };
 
+export type SiyloDiscordState = {
+  status: "stopped" | "connecting" | "connected" | "error";
+  botTag: string;
+  lastError: string;
+};
+
 export type SiyloState = {
   isConnected: boolean;
+  discord: SiyloDiscordState;
   config: SiyloConfig;
   sessions: SiyloSession[];
   logs: SiyloLogEntry[];
