@@ -1,0 +1,27 @@
+{
+  "name": "siylo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Discord-controlled local automation agent built with Electron and Next.js.",
+  "main": "src/main/index.js",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "dev:renderer": "next dev --hostname 127.0.0.1 --port 3000",
+    "build": "next build",
+    "start": "node scripts/start.mjs",
+    "start:renderer": "next start --hostname 127.0.0.1 --port 3000",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "electron": "^35.0.0",
+    "next": "^15.2.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/react": "^19.0.10",
+    "@types/react-dom": "^19.0.4",
+    "typescript": "^5.8.2"
+  }
+}
