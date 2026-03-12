@@ -27,9 +27,21 @@ export type SiyloDiscordState = {
   lastError: string;
 };
 
+export type SiyloUpdateState = {
+  status: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error" | "disabled";
+  currentVersion: string;
+  availableVersion: string;
+  progressPercent: number;
+  transferredBytes: number;
+  totalBytes: number;
+  bytesPerSecond: number;
+  errorMessage: string;
+};
+
 export type SiyloState = {
   isConnected: boolean;
   discord: SiyloDiscordState;
+  update: SiyloUpdateState;
   config: SiyloConfig;
   sessions: SiyloSession[];
   logs: SiyloLogEntry[];
@@ -39,6 +51,8 @@ export type SiyloBridge = {
   getState: () => Promise<SiyloState>;
   start: () => Promise<SiyloState>;
   stop: () => Promise<SiyloState>;
+  checkForUpdates: () => Promise<SiyloState>;
+  installUpdate: () => Promise<SiyloState>;
   updateConfig: (partialConfig: Partial<SiyloConfig>) => Promise<SiyloState>;
   simulateSession: (commandText: string) => Promise<SiyloState>;
   openDashboard: () => Promise<void>;

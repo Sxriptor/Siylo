@@ -9,6 +9,16 @@ const state = {
     botTag: "",
     lastError: ""
   },
+  update: {
+    status: "idle",
+    currentVersion: "",
+    availableVersion: "",
+    progressPercent: 0,
+    transferredBytes: 0,
+    totalBytes: 0,
+    bytesPerSecond: 0,
+    errorMessage: ""
+  },
   config,
   sessions: [],
   logs: [
@@ -39,6 +49,7 @@ function getStateSnapshot() {
   return {
     isConnected: state.isConnected,
     discord: state.discord,
+    update: state.update,
     config: state.config,
     sessions: state.sessions,
     logs: state.logs
@@ -64,6 +75,24 @@ function updateConfig(partialConfig) {
   });
 
   appendLog("info", "Configuration updated.");
+  return getStateSnapshot();
+}
+
+function initializeUpdateState(currentVersion) {
+  state.update = {
+    ...state.update,
+    currentVersion
+  };
+
+  return getStateSnapshot();
+}
+
+function setUpdateState(partialUpdate) {
+  state.update = {
+    ...state.update,
+    ...partialUpdate
+  };
+
   return getStateSnapshot();
 }
 
@@ -96,7 +125,9 @@ module.exports = {
   addSession,
   appendLog,
   getStateSnapshot,
+  initializeUpdateState,
   setDiscordState,
+  setUpdateState,
   updateConfig,
   simulateSession
 };

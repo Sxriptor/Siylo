@@ -4,6 +4,8 @@ contextBridge.exposeInMainWorld("siylo", {
   getState: () => ipcRenderer.invoke("siylo:get-state"),
   start: () => ipcRenderer.invoke("siylo:start"),
   stop: () => ipcRenderer.invoke("siylo:stop"),
+  checkForUpdates: () => ipcRenderer.invoke("siylo:check-for-updates"),
+  installUpdate: () => ipcRenderer.invoke("siylo:install-update"),
   updateConfig: (partialConfig) => ipcRenderer.invoke("siylo:update-config", partialConfig),
   simulateSession: (commandText) => ipcRenderer.invoke("siylo:simulate-session", commandText),
   openDashboard: () => ipcRenderer.invoke("siylo:open-dashboard"),

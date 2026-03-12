@@ -16,6 +16,16 @@ const browserFallbackState: SiyloState = {
     botTag: "",
     lastError: ""
   },
+  update: {
+    status: "disabled",
+    currentVersion: "0.1.0",
+    availableVersion: "",
+    progressPercent: 0,
+    transferredBytes: 0,
+    totalBytes: 0,
+    bytesPerSecond: 0,
+    errorMessage: ""
+  },
   config: {
     botToken: "",
     authorizedUsers: ["123456789012345678", "987654321098765432"],
@@ -50,6 +60,7 @@ export function DashboardShell() {
   const [botTokenInput, setBotTokenInput] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
+  const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
 
   useEffect(() => {
     const siyloBridge = window.siylo;
@@ -127,6 +138,14 @@ export function DashboardShell() {
         label: "Discord runtime",
         value: state.discord.status,
         hint: state.discord.botTag || state.discord.lastError || "No live Discord session yet."
+      },
+      {
+        label: "Installed version",
+        value: state.update.currentVersion || "Unknown",
+        hint:
+          state.update.availableVersion && state.update.availableVersion !== state.update.currentVersion
+            ? `Latest release detected: ${state.update.availableVersion}`
+            : "GitHub Releases updater is wired into the desktop runtime."
       }
     ];
   }, [state]);
@@ -193,8 +212,40 @@ export function DashboardShell() {
     }
   }
 
+  async function handleCheckForUpdates() {
+    if (!window.siylo) {
+      return;
+    }
+
+    setIsCheckingForUpdates(true);
+
+    try {
+      const nextState = await window.siylo.checkForUpdates();
+      setState(nextState);
+    } finally {
+      setIsCheckingForUpdates(false);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    if (!window.siylo) {
+      return;
+    }
+
+    await window.siylo.installUpdate();
+  }
+
+  const showUpdateOverlay =
+    isDesktop &&
+    ["checking", "available", "downloading", "downloaded", "error"].includes(
+      currentState.update.status
+    );
+
   return (
     <main className="shell">
+      {showUpdateOverlay ? (
+        <UpdateOverlay state={currentState} onInstall={handleInstallUpdate} />
+      ) : null}
       <section className="hero card">
         <div>
           <p className="eyebrow">Tray-first desktop agent</p>
@@ -245,6 +296,15 @@ export function DashboardShell() {
               disabled={!isDesktop}
             >
               Open in browser
+            </button>
+            <button
+              className="actionButton secondary"
+              onClick={handleCheckForUpdates}
+              disabled={!isDesktop || currentState.update.status === "downloading" || isCheckingForUpdates}
+            >
+              {isCheckingForUpdates || currentState.update.status === "checking"
+                ? "Checking..."
+                : "Check for updates"}
             </button>
           </div>
         </Panel>
@@ -382,6 +442,64 @@ export function DashboardShell() {
   );
 }
 
+function UpdateOverlay({
+  state,
+  onInstall,
+}: {
+  state: SiyloState;
+  onInstall: () => Promise<void>;
+}) {
+  const updateState = state.update;
+  const progress = Math.round(updateState.progressPercent || 0);
+  const speed =
+    updateState.bytesPerSecond > 0 ? `${formatBytes(updateState.bytesPerSecond)}/s` : "";
+  const downloadSize =
+    updateState.transferredBytes > 0 && updateState.totalBytes > 0
+      ? `${formatBytes(updateState.transferredBytes)} of ${formatBytes(updateState.totalBytes)}`
+      : "";
+
+  return (
+    <section className="updateOverlay card" aria-live="polite">
+      <div className="updateCopy">
+        <p className="eyebrow">Updater</p>
+        <h2>
+          {updateState.status === "checking" && "Checking GitHub Releases"}
+          {updateState.status === "available" && `Update ${updateState.availableVersion} found`}
+          {updateState.status === "downloading" && `Downloading ${updateState.availableVersion}`}
+          {updateState.status === "downloaded" && `Update ${updateState.availableVersion} ready`}
+          {updateState.status === "error" && "Update check failed"}
+        </h2>
+        <p className="lede">
+          {updateState.status === "checking" &&
+            `Current build ${updateState.currentVersion} is comparing against the latest release.`}
+          {updateState.status === "available" &&
+            "The installer download started automatically in the background."}
+          {updateState.status === "downloading" &&
+            `${progress}% complete${downloadSize ? `, ${downloadSize}` : ""}${
+              speed ? ` at ${speed}` : ""
+            }.`}
+          {updateState.status === "downloaded" &&
+            "Restart the app to install the downloaded release."}
+          {updateState.status === "error" &&
+            (updateState.errorMessage || "The updater reported an unexpected error.")}
+        </p>
+      </div>
+      {updateState.status === "downloading" ? (
+        <div className="progressTrack" aria-hidden="true">
+          <div className="progressFill" style={{ width: `${progress}%` }} />
+        </div>
+      ) : null}
+      {updateState.status === "downloaded" ? (
+        <div className="actionRow">
+          <button className="actionButton" onClick={onInstall}>
+            Restart to install
+          </button>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function formatTimestamp(value: string) {
   const date = new Date(value);
 
@@ -395,6 +513,18 @@ function formatTimestamp(value: string) {
     hour: "numeric",
     minute: "2-digit"
   });
+}
+
+function formatBytes(value: number) {
+  if (!Number.isFinite(value) || value <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB"];
+  const exponent = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1);
+  const nextValue = value / 1024 ** exponent;
+
+  return `${nextValue.toFixed(nextValue >= 100 || exponent === 0 ? 0 : 1)} ${units[exponent]}`;
 }
 
 function Panel({

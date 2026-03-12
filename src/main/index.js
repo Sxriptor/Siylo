@@ -11,6 +11,8 @@ const {
 const {
   appendLog,
   getStateSnapshot,
+  initializeUpdateState,
+  setUpdateState,
   simulateSession,
   updateConfig
 } = require("./state");
@@ -19,10 +21,16 @@ const {
   startDiscord,
   stopDiscord
 } = require("./discord-service");
+const {
+  checkForUpdates,
+  configureUpdater,
+  installDownloadedUpdate
+} = require("./update-service");
 
 const isDev = process.env.NODE_ENV === "development";
 const rendererUrl = process.env.SIYLO_RENDERER_URL || "http://127.0.0.1:3000";
 const assetsPath = path.join(app.getAppPath(), "public");
+const productionRendererPath = path.join(app.getAppPath(), "out", "index.html");
 const trayIconPath = path.join(assetsPath, "logo.png");
 const appIconPath = path.join(assetsPath, "logo.ico");
 
@@ -86,7 +94,22 @@ function buildTrayMenu() {
     {
       label: "Open Dashboard",
       click: () => {
-        shell.openExternal(rendererUrl);
+        if (isDev) {
+          shell.openExternal(rendererUrl);
+          return;
+        }
+
+        showWindow();
+      }
+    },
+    {
+      label: "Check for updates",
+      enabled: app.isPackaged,
+      click: () => {
+        checkForUpdates().catch((error) => {
+          appendLog("error", error instanceof Error ? error.message : String(error));
+          broadcastState();
+        });
       }
     },
     {
@@ -143,7 +166,12 @@ function createMainWindow() {
     }
   });
 
-  mainWindow.loadURL(rendererUrl);
+  if (isDev) {
+    mainWindow.loadURL(rendererUrl);
+    return;
+  }
+
+  mainWindow.loadFile(productionRendererPath);
 }
 
 function showWindow() {
@@ -171,6 +199,14 @@ function registerIpc() {
     broadcastState();
     return snapshot;
   });
+  ipcMain.handle("siylo:check-for-updates", async () => {
+    await checkForUpdates();
+    return getStateSnapshot();
+  });
+  ipcMain.handle("siylo:install-update", () => {
+    installDownloadedUpdate();
+    return getStateSnapshot();
+  });
   ipcMain.handle("siylo:update-config", (_, partialConfig) => {
     const snapshot = updateConfig(partialConfig);
     broadcastState();
@@ -181,16 +217,31 @@ function registerIpc() {
     broadcastState();
     return snapshot;
   });
-  ipcMain.handle("siylo:open-dashboard", () => shell.openExternal(rendererUrl));
+  ipcMain.handle("siylo:open-dashboard", () => {
+    if (isDev) {
+      return shell.openExternal(rendererUrl);
+    }
+
+    showWindow();
+    return undefined;
+  });
 }
 
 app.whenReady().then(() => {
   appendLog("info", "Electron shell ready.");
+  initializeUpdateState(app.getVersion());
   initializeDiscordService({
     onStateChanged: broadcastState,
     restartApp: () => {
       app.relaunch();
       app.exit(0);
+    }
+  });
+  configureUpdater({
+    onLog: appendLog,
+    onStatusChange: (partialUpdate) => {
+      setUpdateState(partialUpdate);
+      broadcastState();
     }
   });
   createMainWindow();
@@ -203,6 +254,15 @@ app.whenReady().then(() => {
     startDiscord(snapshot.config).then(() => {
       broadcastState();
     });
+  }
+
+  if (app.isPackaged) {
+    setTimeout(() => {
+      checkForUpdates().catch((error) => {
+        appendLog("error", error instanceof Error ? error.message : String(error));
+        broadcastState();
+      });
+    }, 3000);
   }
 });
 
