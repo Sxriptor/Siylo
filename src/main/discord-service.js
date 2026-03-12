@@ -2,7 +2,6 @@ const fs = require("node:fs/promises");
 const os = require("node:os");
 const path = require("node:path");
 const { spawn } = require("node:child_process");
-const { app } = require("electron");
 const {
   AttachmentBuilder,
   ChannelType,
@@ -113,6 +112,12 @@ async function startDiscord(config) {
 
   nextClient.on(Events.MessageCreate, async (message) => {
     try {
+      log(
+        "info",
+        `MessageCreate received from ${message.author.id} in ${describeChannel(message)}. Mentioned=${Boolean(
+          nextClient.user && message.mentions.users.has(nextClient.user.id)
+        )} RoleMention=${hasMentionedBotRole(message)} ContentPreview=${previewContent(message.content)}`
+      );
       await handleIncomingMessage(message);
     } catch (error) {
       log("error", `Failed to handle Discord message: ${formatError(error)}`);
@@ -192,6 +197,7 @@ function isCommandMessage(message) {
   const configuredPrefix = getStateSnapshot().config.commandPrefix || "@siylo";
   return (
     message.mentions.users.has(client.user.id) ||
+    hasMentionedBotRole(message) ||
     message.content.trim().toLowerCase().startsWith(configuredPrefix.trim().toLowerCase())
   );
 }
@@ -207,6 +213,10 @@ function extractCommandText(message) {
     new RegExp(`^@${escapeRegExp(client.user.username)}`, "i"),
     new RegExp(`^${escapeRegExp(configuredPrefix)}`, "i")
   ];
+  const roleMentionPatterns = Array.from(message.mentions.roles.keys()).map(
+    (roleId) => new RegExp(`<@&${escapeRegExp(roleId)}>`, "g")
+  );
+  mentionPatterns.push(...roleMentionPatterns);
 
   let nextText = message.content;
   for (const pattern of mentionPatterns) {
@@ -231,7 +241,7 @@ async function handleIncomingMessage(message) {
   log("info", `Received Discord command from ${message.author.id}: ${commandText}`);
 
   try {
-    await message.react("👀");
+    await message.react("\u{1F440}");
   } catch (error) {
     log("warn", `Could not add reaction to Discord command: ${formatError(error)}`);
   }
@@ -364,6 +374,22 @@ function describeChannel(message) {
   }
 
   return message.guild ? `${message.guild.name} / ${message.channel.id}` : "unknown channel";
+}
+
+function hasMentionedBotRole(message) {
+  if (!message.guild || !message.guild.members.me) {
+    return false;
+  }
+
+  return message.guild.members.me.roles.cache.some((role) => message.mentions.roles.has(role.id));
+}
+
+function previewContent(content) {
+  if (!content) {
+    return "[empty]";
+  }
+
+  return content.replace(/\s+/g, " ").slice(0, 80);
 }
 
 function getClient() {
