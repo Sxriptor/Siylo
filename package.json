@@ -1,6 +1,6 @@
 {
   "name": "siylo",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Discord-controlled local automation agent built with Electron and Next.js.",
   "main": "src/main/index.js",
@@ -16,6 +16,7 @@
     "discord.js": "^14.19.3",
     "electron": "^35.0.0",
     "next": "^15.2.0",
+    "node-pty": "^1.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "screenshot-desktop": "^1.15.3"

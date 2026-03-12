@@ -19,6 +19,8 @@ const {
 const {
   bringSessionToFront,
   createManagedSession,
+  drainPendingOutput,
+  initializeSessionManager,
   killAllManagedSessions,
   killSession,
   listManagedSessions,
@@ -28,6 +30,7 @@ const {
 let client = null;
 let restartApp = null;
 let notifyStateChanged = null;
+const sessionStreams = new Map();
 
 const appLaunchMap = {
   cmd: {
@@ -75,6 +78,13 @@ function log(level, message) {
 function initializeDiscordService(options = {}) {
   restartApp = options.restartApp || null;
   notifyStateChanged = options.onStateChanged || null;
+  initializeSessionManager({
+    onSessionExit: async ({ sessionId, exitCode, pendingOutput }) => {
+      await flushSessionOutput(sessionId, pendingOutput);
+      await sendSessionMessage(sessionId, `Session ended: ${sessionId} (exit code ${exitCode}).`);
+      stopSessionStream(sessionId);
+    }
+  });
 }
 
 async function startDiscord(config) {
@@ -170,6 +180,10 @@ async function startDiscord(config) {
 }
 
 async function stopDiscord() {
+  for (const sessionId of sessionStreams.keys()) {
+    stopSessionStream(sessionId);
+  }
+
   if (client) {
     await safeDestroy(client);
     client = null;
@@ -393,6 +407,7 @@ async function openTarget(message, target) {
 async function openManagedShell(message, shell) {
   try {
     const session = await createManagedSession(shell);
+    ensureSessionStream(session.id, message.channelId);
     emitState();
     await message.reply(`Session created: ${session.id} (PID ${session.pid})`);
   } catch (error) {
@@ -404,6 +419,7 @@ async function openManagedShell(message, shell) {
 async function runSessionCommand(message, sessionId, commandText) {
   try {
     await sendCommandToSession(sessionId, commandText);
+    ensureSessionStream(sessionId, message.channelId);
     log("info", `Sent command to ${sessionId}: ${commandText}`);
     await message.reply(`Sent to ${sessionId}: ${commandText}`);
   } catch (error) {
@@ -426,6 +442,7 @@ async function frontSession(message, sessionId) {
 async function killSpecificSession(message, sessionId) {
   try {
     await killSession(sessionId);
+    stopSessionStream(sessionId);
     emitState();
     await message.reply(`Killed ${sessionId}.`);
   } catch (error) {
@@ -437,6 +454,9 @@ async function killSpecificSession(message, sessionId) {
 async function killAllSessions(message) {
   try {
     const sessions = await killAllManagedSessions();
+    for (const session of sessions) {
+      stopSessionStream(session.id);
+    }
     emitState();
     await message.reply(
       sessions.length === 0
@@ -463,6 +483,63 @@ function launchDetached(command) {
       resolve();
     });
   });
+}
+
+function ensureSessionStream(sessionId, channelId) {
+  const existing = sessionStreams.get(sessionId);
+  if (existing) {
+    existing.channelId = channelId;
+    return;
+  }
+
+  const intervalId = setInterval(() => {
+    flushSessionOutput(sessionId).catch((error) => {
+      log("warn", `Failed to flush output for ${sessionId}: ${formatError(error)}`);
+    });
+  }, 4000);
+
+  sessionStreams.set(sessionId, {
+    channelId,
+    intervalId
+  });
+}
+
+function stopSessionStream(sessionId) {
+  const stream = sessionStreams.get(sessionId);
+  if (!stream) {
+    return;
+  }
+
+  clearInterval(stream.intervalId);
+  sessionStreams.delete(sessionId);
+}
+
+async function flushSessionOutput(sessionId, forcedOutput = "") {
+  const stream = sessionStreams.get(sessionId);
+  if (!stream || !client) {
+    return;
+  }
+
+  const output = forcedOutput || drainPendingOutput(sessionId);
+  if (!output) {
+    return;
+  }
+
+  await sendSessionMessage(sessionId, `\`\`\`\n${output.slice(-1700)}\n\`\`\``);
+}
+
+async function sendSessionMessage(sessionId, body) {
+  const stream = sessionStreams.get(sessionId);
+  if (!stream || !client) {
+    return;
+  }
+
+  const channel = await client.channels.fetch(stream.channelId);
+  if (!channel || !channel.isTextBased()) {
+    return;
+  }
+
+  await channel.send(`**${sessionId}**\n${body}`);
 }
 
 function escapeRegExp(value) {
