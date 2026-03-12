@@ -9,14 +9,44 @@ const levelTone: Record<string, string> = {
   error: "var(--danger)",
 };
 
+const browserFallbackState: SiyloState = {
+  isConnected: false,
+  config: {
+    botToken: "",
+    authorizedUsers: ["123456789012345678", "987654321098765432"],
+    dashboardPort: 3000,
+    autoConnect: false,
+    commandPrefix: "@siylo"
+  },
+  sessions: [
+    {
+      id: "cmd-1",
+      shell: "cmd",
+      status: "idle",
+      lastCommand: "npm run dev",
+      createdAt: new Date().toISOString()
+    }
+  ],
+  logs: [
+    {
+      id: "browser-preview",
+      level: "info",
+      message: "Browser dashboard preview loaded without Electron runtime access.",
+      timestamp: new Date().toISOString()
+    }
+  ]
+};
+
 export function DashboardShell() {
-  const [state, setState] = useState<SiyloState | null>(null);
+  const [state, setState] = useState<SiyloState>(browserFallbackState);
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
+  const isDesktop = typeof window !== "undefined" && Boolean(window.siylo);
 
   useEffect(() => {
     if (!window.siylo) {
+      setState(browserFallbackState);
       return;
     }
 
@@ -39,10 +69,6 @@ export function DashboardShell() {
   }, []);
 
   useEffect(() => {
-    if (!state) {
-      return;
-    }
-
     setAuthorizedUsersInput(state.config.authorizedUsers.join("\n"));
   }, [state]);
 
@@ -58,10 +84,6 @@ export function DashboardShell() {
   }, [state?.config.commandPrefix]);
 
   const settings = useMemo(() => {
-    if (!state) {
-      return [];
-    }
-
     return [
       {
         label: "Start in system tray",
@@ -85,20 +107,6 @@ export function DashboardShell() {
       }
     ];
   }, [state]);
-
-  if (!state) {
-    return (
-      <main className="shell">
-        <section className="hero card">
-          <div>
-            <p className="eyebrow">Tray-first desktop agent</p>
-            <h1>Siylo control surface</h1>
-            <p className="lede">Loading local state from the Electron runtime.</p>
-          </div>
-        </section>
-      </main>
-    );
-  }
 
   const currentState = state;
   const agentState = currentState.isConnected ? "running" : "stopped";
@@ -170,6 +178,12 @@ export function DashboardShell() {
             Local Discord-driven automation for terminal sessions, screenshots, and app
             launches, designed to stay quiet until you need it.
           </p>
+          {!isDesktop ? (
+            <p className="lede muted">
+              Browser view is showing the same dashboard layout with preview data. Live controls
+              remain available inside the Electron app.
+            </p>
+          ) : null}
         </div>
         <div className="heroGrid">
           <Metric label="Agent state" value={agentState} accent />
@@ -191,13 +205,20 @@ export function DashboardShell() {
               value={currentState.isConnected ? "Authorized mentions only" : "Paused"}
             />
             <Row label="Tray mode" value="Primary control surface" />
-            <Row label="Dashboard mode" value="Optional browser entrypoint" />
+            <Row
+              label="Dashboard mode"
+              value={isDesktop ? "Electron runtime" : "Browser preview"}
+            />
           </dl>
           <div className="actionRow">
-            <button className="actionButton" onClick={handleStartStop}>
-              {state.isConnected ? "Stop agent" : "Start agent"}
+            <button className="actionButton" onClick={handleStartStop} disabled={!isDesktop}>
+              {currentState.isConnected ? "Stop agent" : "Start agent"}
             </button>
-            <button className="actionButton secondary" onClick={() => window.siylo?.openDashboard()}>
+            <button
+              className="actionButton secondary"
+              onClick={() => window.siylo?.openDashboard()}
+              disabled={!isDesktop}
+            >
               Open in browser
             </button>
           </div>
@@ -222,10 +243,15 @@ export function DashboardShell() {
             className="textInput"
             rows={5}
             value={authorizedUsersInput}
+            disabled={!isDesktop}
             onChange={(event) => setAuthorizedUsersInput(event.target.value)}
           />
           <div className="actionRow">
-            <button className="actionButton" onClick={handleSaveUsers} disabled={isSaving}>
+            <button
+              className="actionButton"
+              onClick={handleSaveUsers}
+              disabled={!isDesktop || isSaving}
+            >
               {isSaving ? "Saving..." : "Save users"}
             </button>
           </div>
@@ -252,7 +278,7 @@ export function DashboardShell() {
             <button
               className="actionButton"
               onClick={handleCreateSession}
-              disabled={isStartingSession}
+              disabled={!isDesktop || isStartingSession}
             >
               {isStartingSession ? "Creating..." : "Create session"}
             </button>
