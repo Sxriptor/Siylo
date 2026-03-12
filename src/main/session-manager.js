@@ -1,4 +1,4 @@
-const { spawn } = require("node:child_process");
+const pty = require("node-pty");
 const {
   addSession,
   appendLog,
@@ -7,6 +7,14 @@ const {
   removeSession,
   updateSession
 } = require("./state");
+
+const runtimeSessions = new Map();
+
+let onSessionExit = null;
+
+function initializeSessionManager(options = {}) {
+  onSessionExit = options.onSessionExit || null;
+}
 
 function getNextSessionId(shell) {
   const prefix = shell.toLowerCase();
@@ -27,101 +35,143 @@ async function createManagedSession(shell) {
   }
 
   const sessionId = getNextSessionId(normalizedShell);
-  const windowTitle = `Siylo-${sessionId}`;
-
-  const script =
-    normalizedShell === "cmd"
-      ? `$p = Start-Process cmd.exe -ArgumentList '/k title ${escapeSingleQuoted(windowTitle)}' -PassThru -WindowStyle Normal; $p.Id`
-      : `$p = Start-Process powershell.exe -ArgumentList '-NoExit','-Command',\"$host.UI.RawUI.WindowTitle = '${escapePowerShellSingleQuoted(
-          windowTitle
-        )}'\" -PassThru -WindowStyle Normal; $p.Id`;
-
-  const pidOutput = await runPowerShell(script);
-  const pid = Number.parseInt(pidOutput.trim(), 10);
-
-  if (!Number.isFinite(pid)) {
-    throw new Error(`Could not determine process id for ${sessionId}.`);
-  }
+  const executable = normalizedShell === "cmd" ? "cmd.exe" : "powershell.exe";
+  const args = normalizedShell === "cmd" ? [] : ["-NoLogo"];
+  const ptyProcess = pty.spawn(executable, args, {
+    name: "xterm-color",
+    cwd: process.cwd(),
+    env: process.env,
+    cols: 120,
+    rows: 30
+  });
 
   const session = addSession({
     id: sessionId,
     shell: normalizedShell,
-    status: "idle",
+    status: "active",
     lastCommand: `open ${normalizedShell}`,
-    pid,
-    windowTitle
+    pid: ptyProcess.pid
   });
 
-  appendLog("info", `Managed session created: ${session.id} (PID ${pid}).`);
+  runtimeSessions.set(sessionId, {
+    process: ptyProcess,
+    pendingOutput: "",
+    recentOutput: "",
+    isBusy: false,
+    closed: false
+  });
+
+  ptyProcess.onData((data) => {
+    const runtime = runtimeSessions.get(sessionId);
+    if (!runtime) {
+      return;
+    }
+
+    const cleaned = stripAnsi(data);
+    runtime.pendingOutput = `${runtime.pendingOutput}${cleaned}`.slice(-24000);
+    runtime.recentOutput = `${runtime.recentOutput}${cleaned}`.slice(-4000);
+    runtime.isBusy = detectBusyState(runtime.recentOutput);
+  });
+
+  ptyProcess.onExit(({ exitCode }) => {
+    const runtime = runtimeSessions.get(sessionId);
+    runtimeSessions.delete(sessionId);
+    removeSession(sessionId);
+    appendLog("info", `Managed session exited: ${sessionId} (code ${exitCode}).`);
+
+    if (typeof onSessionExit === "function") {
+      onSessionExit({
+        sessionId,
+        exitCode,
+        pendingOutput: runtime ? runtime.pendingOutput : ""
+      });
+    }
+  });
+
+  appendLog("info", `Managed PTY session created: ${session.id} (PID ${ptyProcess.pid}).`);
   return session;
 }
 
 async function sendCommandToSession(sessionId, commandText) {
   const session = requireSession(sessionId);
+  const runtime = requireRuntimeSession(sessionId);
+  ensureSessionReadyForInput(sessionId, runtime);
 
-  const escapedKeys = escapeSendKeys(commandText);
-  const script = [
-    "$wshell = New-Object -ComObject WScript.Shell",
-    buildActivationScript(session),
-    "Start-Sleep -Milliseconds 200",
-    `$wshell.SendKeys('${escapePowerShellSingleQuoted(escapedKeys)}')`,
-    "Start-Sleep -Milliseconds 100",
-    "$wshell.SendKeys('{ENTER}')",
-    "Start-Sleep -Milliseconds 700",
-    buildForegroundWindowInfoScript()
-  ].join("; ");
+  runtime.process.write(commandText);
+  await delay(90);
+  runtime.process.write("\r");
 
-  const windowInfo = parseWindowInfo(await runPowerShell(script));
   return (
     updateSession(sessionId, {
       status: "active",
-      lastCommand: commandText,
-      pid: windowInfo.pid || session.pid,
-      windowTitle: windowInfo.title || session.windowTitle
+      lastCommand: commandText
     }) || session
   );
 }
 
-async function bringSessionToFront(sessionId) {
+async function sendTextToSession(sessionId, commandText) {
   const session = requireSession(sessionId);
+  const runtime = requireRuntimeSession(sessionId);
+  ensureSessionReadyForInput(sessionId, runtime);
 
-  const script = [
-    "$wshell = New-Object -ComObject WScript.Shell",
-    buildActivationScript(session),
-    "Start-Sleep -Milliseconds 250",
-    buildForegroundWindowInfoScript()
-  ].join("; ");
+  runtime.process.write(commandText);
+  await delay(90);
+  runtime.process.write("\r");
 
-  const windowInfo = parseWindowInfo(await runPowerShell(script));
   return (
     updateSession(sessionId, {
       status: "active",
-      pid: windowInfo.pid || session.pid,
-      windowTitle: windowInfo.title || session.windowTitle
+      lastCommand: commandText
     }) || session
   );
+}
+
+async function sendKeyToSession(sessionId, keyName) {
+  const session = requireSession(sessionId);
+  const runtime = requireRuntimeSession(sessionId);
+  const keyMap = {
+    enter: "\r",
+    esc: "\u001b",
+    "ctrl+c": "\u0003",
+    "ctrl+l": "\u000c"
+  };
+
+  const keyValue = keyMap[keyName.toLowerCase()];
+  if (!keyValue) {
+    throw new Error(`Unsupported key command: ${keyName}`);
+  }
+
+  runtime.process.write(keyValue);
+
+  return (
+    updateSession(sessionId, {
+      status: "active",
+      lastCommand: keyName.toLowerCase()
+    }) || session
+  );
+}
+
+async function bringSessionToFront() {
+  throw new Error("Front is not supported for PTY-backed sessions.");
 }
 
 async function killSession(sessionId) {
   const session = requireSession(sessionId);
-  const pid = session.pid;
+  const runtime = runtimeSessions.get(sessionId);
 
-  if (!pid) {
-    removeSession(sessionId);
-    return session;
+  if (runtime) {
+    runtime.closed = true;
+    runtime.process.kill();
+    runtimeSessions.delete(sessionId);
   }
 
-  await runPowerShell(`Stop-Process -Id ${pid} -Force -ErrorAction Stop`);
   removeSession(sessionId);
   appendLog("info", `Managed session killed: ${sessionId}.`);
   return session;
 }
 
 async function killAllManagedSessions() {
-  const sessions = getStateSnapshot().sessions.filter((session) =>
-    ["cmd", "powershell"].includes(session.shell.toLowerCase())
-  );
-
+  const sessions = listManagedSessions();
   const killed = [];
 
   for (const session of sessions) {
@@ -142,6 +192,17 @@ function listManagedSessions() {
   );
 }
 
+function drainPendingOutput(sessionId, maxLength = 1600) {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime || !runtime.pendingOutput) {
+    return "";
+  }
+
+  const output = compactTerminalOutput(runtime.pendingOutput).slice(-maxLength);
+  runtime.pendingOutput = "";
+  return output.trim();
+}
+
 function requireSession(sessionId) {
   const session = getSession(sessionId);
   if (!session) {
@@ -151,98 +212,120 @@ function requireSession(sessionId) {
   return session;
 }
 
-function runPowerShell(script) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-      {
-        windowsHide: true
-      }
+function requireRuntimeSession(sessionId) {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    throw new Error(`Managed runtime not found for ${sessionId}`);
+  }
+
+  return runtime;
+}
+
+function ensureSessionReadyForInput(sessionId, runtime) {
+  if (runtime.isBusy) {
+    throw new Error(
+      `Session ${sessionId} appears busy. Wait for the current run to finish or send \`${sessionId} ctrl+c\` first.`
     );
+  }
+}
 
-    let stdout = "";
-    let stderr = "";
+function stripAnsi(value) {
+  return value.replace(
+    // eslint-disable-next-line no-control-regex
+    /\u001b\[[0-9;?]*[ -/]*[@-~]|\u001b][^\u0007]*(?:\u0007|\u001b\\)|[\u0000-\u0008\u000b-\u001f\u007f]/g,
+    ""
+  );
+}
 
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk.toString();
-    });
+function compactTerminalOutput(value) {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\t/g, "  ");
 
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+  const compactedLines = [];
+  let skipSpinnerBlock = false;
 
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-        return;
+  for (const rawLine of normalized.split("\n")) {
+    const line = rawLine.replace(/\s+$/g, "");
+    const trimmed = line.trim();
+    const previous = compactedLines[compactedLines.length - 1] || "";
+    const previousTrimmed = previous.trim();
+
+    if (containsTransientStatus(trimmed)) {
+      skipSpinnerBlock = true;
+      continue;
+    }
+
+    if (isSpinnerFragment(trimmed)) {
+      skipSpinnerBlock = true;
+      continue;
+    }
+
+    if (skipSpinnerBlock) {
+      if (!trimmed || isTransientStatusLine(trimmed) || isSpinnerFragment(trimmed)) {
+        continue;
       }
 
-      reject(new Error(stderr.trim() || stdout.trim() || `PowerShell exited with code ${code}`));
-    });
+      skipSpinnerBlock = false;
+    }
+
+    if (!trimmed) {
+      if (previousTrimmed) {
+        compactedLines.push("");
+      }
+      continue;
+    }
+
+    if (trimmed === previousTrimmed) {
+      continue;
+    }
+
+    if (isTransientStatusLine(trimmed)) {
+      continue;
+    }
+
+    if (
+      trimmed.length <= 6 &&
+      previousTrimmed &&
+      (previousTrimmed.startsWith(trimmed) || trimmed.startsWith(previousTrimmed))
+    ) {
+      continue;
+    }
+
+    compactedLines.push(line);
+  }
+
+  return compactedLines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
   });
 }
 
-function buildActivationScript(session) {
-  const attempts = [];
-
-  if (session.pid) {
-    attempts.push(`$ok = $wshell.AppActivate(${session.pid})`);
-  }
-
-  if (session.windowTitle) {
-    attempts.push(`if (-not $ok) { $ok = $wshell.AppActivate('${escapePowerShellSingleQuoted(session.windowTitle)}') }`);
-  }
-
-  attempts.push("if (-not $ok) { throw 'Session window could not be activated.' }");
-  return attempts.join("; ");
+function isTransientStatusLine(value) {
+  return (
+    /^working(?:\s*\(\d+s.*\))?$/i.test(value) ||
+    /^running\s+/i.test(value) ||
+    /^explain this codebase$/i.test(value) ||
+    /^(w|wo|wor|work|worki|workin|working)$/i.test(value) ||
+    /^\d+$/.test(value)
+  );
 }
 
-function buildForegroundWindowInfoScript() {
-  return [
-    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Text; public static class SiyloWindowInfo { [DllImport(\"user32.dll\")] public static extern IntPtr GetForegroundWindow(); [DllImport(\"user32.dll\")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint pid); [DllImport(\"user32.dll\", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder text, int count); }'",
-    "$hwnd = [SiyloWindowInfo]::GetForegroundWindow()",
-    "$activePid = 0",
-    "[SiyloWindowInfo]::GetWindowThreadProcessId($hwnd, [ref]$activePid) | Out-Null",
-    "$titleBuilder = New-Object System.Text.StringBuilder 1024",
-    "[SiyloWindowInfo]::GetWindowText($hwnd, $titleBuilder, $titleBuilder.Capacity) | Out-Null",
-    "Write-Output ('SIYLO_WINDOW|' + $activePid + '|' + $titleBuilder.ToString())"
-  ].join("; ");
+function isSpinnerFragment(value) {
+  return /^(w|wo|wor|work|worki|workin|working|\d+|orking|rking|king|ing|ng|g)?$/i.test(value);
 }
 
-function parseWindowInfo(output) {
-  const markerLine = output
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find((line) => line.startsWith("SIYLO_WINDOW|"));
-
-  if (!markerLine) {
-    return {
-      pid: null,
-      title: ""
-    };
-  }
-
-  const [, pidValue, ...titleParts] = markerLine.split("|");
-  const pid = Number.parseInt(pidValue, 10);
-
-  return {
-    pid: Number.isFinite(pid) ? pid : null,
-    title: titleParts.join("|").trim()
-  };
+function containsTransientStatus(value) {
+  return /working\s*\(\d+s.*esc to interrupt/i.test(value) || /\bworking\b/i.test(value) && /\besc to interrupt\b/i.test(value);
 }
 
-function escapeSingleQuoted(value) {
-  return value.replace(/'/g, "''");
-}
-
-function escapePowerShellSingleQuoted(value) {
-  return value.replace(/'/g, "''");
-}
-
-function escapeSendKeys(value) {
-  return value.replace(/[+^%~(){}[\]]/g, "{$&}");
+function detectBusyState(value) {
+  const compact = value.toLowerCase();
+  return compact.includes("esc to interrupt") || /\bworking\s*\(\d+s/.test(compact);
 }
 
 function formatError(error) {
@@ -256,8 +339,12 @@ function formatError(error) {
 module.exports = {
   bringSessionToFront,
   createManagedSession,
+  drainPendingOutput,
+  initializeSessionManager,
   killAllManagedSessions,
   killSession,
   listManagedSessions,
-  sendCommandToSession
+  sendKeyToSession,
+  sendCommandToSession,
+  sendTextToSession
 };
