@@ -12,11 +12,18 @@ const {
 } = require("discord.js");
 const screenshot = require("screenshot-desktop");
 const {
-  addSession,
   appendLog,
   getStateSnapshot,
   setDiscordState
 } = require("./state");
+const {
+  bringSessionToFront,
+  createManagedSession,
+  killAllManagedSessions,
+  killSession,
+  listManagedSessions,
+  sendCommandToSession
+} = require("./session-manager");
 
 let client = null;
 let restartApp = null;
@@ -256,10 +263,16 @@ async function handleIncomingMessage(message) {
 }
 
 async function dispatchCommand(message, commandText) {
-  const lowerCommand = commandText.toLowerCase();
+  const trimmedCommand = commandText.trim();
+  const lowerCommand = trimmedCommand.toLowerCase();
 
   if (lowerCommand === "logs") {
     await sendLogs(message);
+    return;
+  }
+
+  if (lowerCommand === "list") {
+    await sendSessionList(message);
     return;
   }
 
@@ -283,9 +296,47 @@ async function dispatchCommand(message, commandText) {
     return;
   }
 
+  if (lowerCommand === "kill all") {
+    await killAllSessions(message);
+    return;
+  }
+
+  const killMatch = trimmedCommand.match(/^kill\s+([a-z]+-\d+)$/i);
+  if (killMatch) {
+    await killSpecificSession(message, killMatch[1]);
+    return;
+  }
+
+  const frontMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+front$/i);
+  if (frontMatch) {
+    await frontSession(message, frontMatch[1]);
+    return;
+  }
+
+  const sessionCommandMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+["']([\s\S]+)["']$/i);
+  if (sessionCommandMatch) {
+    await runSessionCommand(message, sessionCommandMatch[1], sessionCommandMatch[2]);
+    return;
+  }
+
   await message.reply(
-    "Unknown command. Supported commands: `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`."
+    "Unknown command. Supported commands: `list`, `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`, `cmd-1 \"codex\"`, `cmd-1 front`, `kill cmd-1`, `kill all`."
   );
+}
+
+async function sendSessionList(message) {
+  const sessions = listManagedSessions();
+
+  if (sessions.length === 0) {
+    await message.reply("No managed cmd or powershell sessions are currently open.");
+    return;
+  }
+
+  const lines = sessions.map(
+    (session) => `${session.id} | ${session.shell} | PID ${session.pid ?? "unknown"} | ${session.status}`
+  );
+
+  await message.reply(`Managed sessions:\n\`\`\`\n${lines.join("\n")}\n\`\`\``);
 }
 
 async function sendLogs(message) {
@@ -318,6 +369,11 @@ async function sendScreenshot(message) {
 }
 
 async function openTarget(message, target) {
+  if (target === "cmd" || target === "powershell") {
+    await openManagedShell(message, target);
+    return;
+  }
+
   const mappedTarget = appLaunchMap[target];
   if (!mappedTarget) {
     await message.reply(`Unknown app target: ${target}`);
@@ -326,17 +382,70 @@ async function openTarget(message, target) {
 
   try {
     await launchDetached(mappedTarget.launchCommand);
-    const session = addSession({
-      shell: mappedTarget.shellLabel,
-      status: "idle",
-      lastCommand: `open ${target}`
-    });
     log("info", `Launched ${target} from Discord command.`);
-    emitState();
-    await message.reply(`Launched ${target}. Session created: ${session.id}`);
+    await message.reply(`Launched ${target}.`);
   } catch (error) {
     log("error", `Failed to launch ${target}: ${formatError(error)}`);
     await message.reply(`Failed to launch ${target}: ${formatError(error)}`);
+  }
+}
+
+async function openManagedShell(message, shell) {
+  try {
+    const session = await createManagedSession(shell);
+    emitState();
+    await message.reply(`Session created: ${session.id} (PID ${session.pid})`);
+  } catch (error) {
+    log("error", `Failed to create ${shell} session: ${formatError(error)}`);
+    await message.reply(`Failed to create ${shell} session: ${formatError(error)}`);
+  }
+}
+
+async function runSessionCommand(message, sessionId, commandText) {
+  try {
+    await sendCommandToSession(sessionId, commandText);
+    log("info", `Sent command to ${sessionId}: ${commandText}`);
+    await message.reply(`Sent to ${sessionId}: ${commandText}`);
+  } catch (error) {
+    log("error", `Failed to send command to ${sessionId}: ${formatError(error)}`);
+    await message.reply(`Failed to send command to ${sessionId}: ${formatError(error)}`);
+  }
+}
+
+async function frontSession(message, sessionId) {
+  try {
+    await bringSessionToFront(sessionId);
+    log("info", `Brought session ${sessionId} to front.`);
+    await message.reply(`Brought ${sessionId} to the front.`);
+  } catch (error) {
+    log("error", `Failed to bring ${sessionId} to front: ${formatError(error)}`);
+    await message.reply(`Failed to bring ${sessionId} to front: ${formatError(error)}`);
+  }
+}
+
+async function killSpecificSession(message, sessionId) {
+  try {
+    await killSession(sessionId);
+    emitState();
+    await message.reply(`Killed ${sessionId}.`);
+  } catch (error) {
+    log("error", `Failed to kill ${sessionId}: ${formatError(error)}`);
+    await message.reply(`Failed to kill ${sessionId}: ${formatError(error)}`);
+  }
+}
+
+async function killAllSessions(message) {
+  try {
+    const sessions = await killAllManagedSessions();
+    emitState();
+    await message.reply(
+      sessions.length === 0
+        ? "No managed cmd or powershell sessions were running."
+        : `Killed ${sessions.length} managed session${sessions.length === 1 ? "" : "s"}.`
+    );
+  } catch (error) {
+    log("error", `Failed to kill all sessions: ${formatError(error)}`);
+    await message.reply(`Failed to kill all sessions: ${formatError(error)}`);
   }
 }
 

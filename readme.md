@@ -1,491 +1,199 @@
 # Siylo
-**Discord-Controlled Local Automation Agent**
 
-Siylo is a lightweight desktop automation agent that allows authorized Discord users to control and interact with a computer remotely through simple Discord commands.
+Siylo is a tray-first Electron desktop app with a Next.js dashboard and a Discord bot bridge for controlling a local Windows machine.
 
-The application runs locally as an **Electron + Next.js + React desktop app** and primarily lives in the **system tray**. It connects to Discord using a bot token and listens for commands directed at `@siylo`.
+The current build focuses on a small working surface:
 
-The goal of Siylo is to provide a clean, secure, and extremely simple way to control development environments, terminals, and applications remotely.
+- connect and disconnect a Discord bot
+- store a bot token and authorized Discord user IDs locally
+- create and track managed `cmd` and `powershell` sessions
+- send quoted commands to those managed sessions
+- bring a managed session window to the foreground
+- kill one managed session or all managed sessions
+- capture and return a desktop screenshot
+- launch a few mapped apps such as `cursor` and `vscode`
+- inspect recent runtime logs from Discord
 
----
+## Stack
 
-# Core Concept
+- Electron for the desktop shell and tray integration
+- Next.js 15 and React 19 for the dashboard UI
+- `discord.js` for bot connectivity
+- `screenshot-desktop` for screenshot capture
 
-Siylo runs locally on the user's machine and maintains a persistent connection to Discord.
+## Current Architecture
 
-When a Discord user sends a command mentioning the Siylo bot, the bot receives the message and passes the command to the local Siylo agent.
+The app has two parts:
 
-The agent then executes the requested action on the local computer and optionally returns output back to Discord.
+1. Electron main process in [src/main/index.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/index.js)
+2. Next.js dashboard in [src/app/page.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/app/page.tsx)
 
+Electron owns the real runtime:
 
-Discord User
-↓
-Discord Servers
-↓
-Siylo Bot Message Event
-↓
-Local Siylo Agent
-↓
-System Command Execution
-↓
-Response Sent Back To Discord
+- tray menu
+- Discord connection lifecycle
+- local config persistence
+- managed terminal sessions
+- IPC bridge exposed from [src/main/preload.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/preload.js)
 
+The dashboard in [src/components/dashboard-shell.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components/dashboard-shell.tsx) shows live state when running inside Electron and falls back to preview data in a normal browser tab.
 
-The Discord bot **does not execute anything itself**. It only relays commands to the Siylo application running locally.
+## Platform Assumptions
 
----
+This implementation is currently Windows-oriented.
 
-# Tech Stack
+- managed sessions use PowerShell automation and `WScript.Shell`
+- shell launching assumes `cmd.exe` and `powershell.exe`
+- app launching uses Windows `start`
 
-Siylo is built as a modern desktop application using the following stack:
+Running the UI in a browser works cross-platform as a preview, but the desktop automation features are implemented for Windows.
 
-**Desktop Framework**
-- Electron
+## Local Development
 
-**Frontend**
-- Next.js
-- React
+Install dependencies:
 
-**Backend (local runtime)**
-- Node.js
+```bash
+npm install
+```
 
-**Communication**
-- Discord Gateway API
+Run the Next.js renderer and Electron together:
 
----
+```bash
+npm run dev
+```
 
-# Application Behavior
+Build the renderer:
 
-Most of the time Siylo runs silently in the background.
+```bash
+npm run build
+```
 
-The application primarily exists as a **system tray agent** with minimal UI.
+Start Electron against the built renderer:
 
-Optional interfaces include:
+```bash
+npm start
+```
 
-- a simple **CLI overlay window**
-- a **local web dashboard**
+Type-check the project:
 
----
+```bash
+npm run typecheck
+```
 
-# System Tray
+## Configuration
 
-When Siylo launches, it places an icon in the system tray.
+Siylo stores config in Electron `userData` as `siylo.config.json`.
 
-Clicking the tray icon reveals the primary control menu.
+Tracked settings:
 
-## Tray Menu
+- `botToken`
+- `authorizedUsers`
+- `dashboardPort`
+- `autoConnect`
+- `commandPrefix`
 
+The dashboard currently allows editing the bot token and authorized Discord user IDs. `dashboardPort` and `commandPrefix` exist in state, but the UI does not yet expose full editing controls for them.
 
-Siylo
+## Tray Behavior
 
-Start
-Stop
-Settings
-Quit
+When the app starts, Electron creates:
 
-
-### Start
-Starts the Discord connection and activates command listening.
-
-### Stop
-Disconnects Siylo from Discord and disables remote commands.
-
-### Settings
-Opens the Siylo configuration interface.
-
-### Quit
-Completely closes the Siylo application.
-
----
-
-# Optional Interfaces
-
-Siylo supports two optional control interfaces.
-
-## CLI Overlay
-
-A minimal terminal-style overlay window for quick command execution.
-
-Example usage:
-
-
-start
-open cursor
-screenshot
-
-
-This is primarily for debugging and manual control.
-
----
-
-## Local Web Dashboard
-
-Siylo can optionally open a browser window pointing to:
-
-
-http://localhost:{port}
-
-
-This dashboard allows users to configure:
-
-- Discord bot credentials
-- authorized Discord users
-- command permissions
-- system integrations
-- session management
-
-The browser will open using the **system's default browser**.
-
----
-
-# Authentication & Permissions
-
-Security is handled through **Discord user ID authorization**.
-
-Only explicitly authorized users may control Siylo.
-
-Authorization is configured through the Siylo dashboard.
-
-## Authorized Users
-
-Each authorized user is stored by Discord ID.
-
-Example:
-
-
-Authorized Users
-
-123456789012345678
-987654321098765432
-
-
-When a command is received:
-
-
-if message.author.id not in authorized_users
-ignore command
-
-
-Unauthorized users receive no response.
-
----
-
-# Discord Command Format
-
-Commands must mention the Siylo bot.
-
-All commands follow a very simple structure:
-
-
-@siylo command arguments
-
-
-Example:
-
-
-@siylo open cursor
-@siylo screenshot
-@siylo restart
-@siylo logs
-
-
-The goal is to keep commands **extremely simple and natural**.
-
----
-
-# Core Commands
-
-## System Control
-
-
-@siylo restart
-
-
-Restarts the Siylo application.
-
-
-@siylo logs
-
-
-Returns recent logs from the Siylo agent.
-
-
-@siylo screenshot
-
-
-Captures a screenshot of the system and sends it back to Discord.
-
----
-
-## Opening Applications
-
-Siylo can launch applications installed on the system.
-
-
-@siylo open cmd
-@siylo open powershell
-@siylo open cursor
-@siylo open vscode
-@siylo open kiro
-
-
-Applications are mapped internally.
-
-Example mapping:
-
-
-cursor → Cursor IDE
-vscode → Visual Studio Code
-cmd → Windows Command Prompt
-powershell → Windows PowerShell
-
-
----
-
-# Terminal Sessions
-
-Siylo supports persistent terminal sessions.
-
-Each terminal instance is assigned a **session number**.
-
-Example:
-
-
-cmd-1
-cmd-2
-powershell-1
-powershell-2
-
-
-## Creating Sessions
-
-
-@siylo open cmd
-
-
-Response:
-
-
-Session created: cmd-1
-
-
----
-
-## Running Commands in Sessions
-
-Users can send commands to specific sessions.
-
-Example:
-
-
-@siylo cmd-1 git pull
-@siylo cmd-1 npm run dev
-
-
-Siylo executes the command inside that terminal session.
-
----
-
-## Interactive Session Example
-
-
-@siylo open cmd
-→ cmd-1 created
-
-@siylo cmd-1 codex
-→ codex started
-
-@siylo cmd-1 continue
-→ session continues
-
-
-Sessions persist until closed.
-
----
-
-# IDE Interaction
-
-Siylo can open development environments.
+- a hidden main window
+- a tray icon
+- a tray menu with `Start`, `Stop`, `Settings`, `Open Dashboard`, and `Quit`
+
+In development, the window is shown automatically once the renderer is ready. In normal use, the app is intended to stay in the tray until opened.
+
+## Discord Command Handling
+
+Commands are accepted from:
+
+- DMs to the bot
+- messages that mention the bot user
+- messages that mention one of the bot's roles
+- messages that start with the configured prefix, which defaults to `@siylo`
+
+Only Discord user IDs listed in `authorizedUsers` are allowed to execute commands.
+
+## Supported Commands
+
+Implemented command set in [src/main/discord-service.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/discord-service.js):
+
+- `list`
+- `logs`
+- `screenshot`
+- `restart`
+- `open cmd`
+- `open powershell`
+- `open cursor`
+- `open vscode`
+- `open kiro`
+- `open browser`
+- `kill all`
+- `kill <session-id>`
+- `<session-id> front`
+- `<session-id> "your command here"`
 
 Examples:
 
-
-@siylo open cursor
-@siylo open vscode
-
-
-Future capabilities may include:
-
-- sending commands to IDE terminals
-- triggering builds
-- executing scripts
-- opening specific projects
-
----
-
-# File Operations
-
-Basic file commands can be supported.
-
-Examples:
-
-
-@siylo create file notes.txt
-@siylo open folder projects
-@siylo open browser
-
-
----
-
-# Logging
-
-Siylo maintains a runtime log.
-
-Logs include:
-
-- received commands
-- executed actions
-- errors
-- session activity
-
-Command:
-
-
-@siylo logs
-
-
-Returns the most recent log entries.
-
----
-
-# Screenshot
-
-
-@siylo screenshot
-
-
-Captures the current screen and sends the image back to Discord.
-
-Useful for:
-
-- monitoring remote builds
-- checking system state
-- debugging UI issues
-
----
-
-# Example Command Session
-
-
+```text
 @siylo open cmd
-→ cmd-1 started
-
-@siylo cmd-1 git pull
-→ pulling repository
-
-@siylo cmd-1 npm run build
-→ build started
-
+@siylo cmd-1 "npm run dev"
+@siylo cmd-1 front
+@siylo list
 @siylo screenshot
-→ screenshot returned
+```
 
+The session command format currently requires quotes around the forwarded command body.
 
----
+## Managed Sessions
 
-# Startup Behavior
+Managed sessions are implemented in [src/main/session-manager.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/session-manager.js).
 
-When Siylo launches:
+Current behavior:
 
-1. Tray icon initializes
-2. Configuration loads
-3. Discord connection initializes
-4. Authorized user list loads
-5. Command listener activates
+- only `cmd` and `powershell` are treated as managed sessions
+- sessions are assigned IDs like `cmd-1` and `powershell-1`
+- the app tracks session metadata in memory
+- commands are sent by bringing the terminal window forward and using simulated keystrokes
 
----
+This means Siylo is not attaching to a PTY or streaming terminal output back to Discord. It automates visible shell windows on the local machine.
 
-# Design Goals
+## Logging and State
 
-Siylo is designed with the following priorities:
+Runtime state is held in [src/main/state.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/state.js).
 
-### Simplicity
-Commands must be easy to remember and type.
+The app keeps:
 
-### Security
-Only authorized Discord IDs may control the system.
+- Discord connection status
+- current config snapshot
+- up to 10 recent sessions
+- up to 100 recent log entries
 
-### Lightweight
-The application runs silently in the tray with minimal resource usage.
+`logs` in Discord returns the most recent entries from this in-memory log buffer.
 
-### Developer Focused
-Built primarily for developers controlling local machines remotely.
+## Browser Preview vs Electron Runtime
 
----
+Opening the Next.js app directly in a browser shows the dashboard with fallback sample data. Live controls only work when the page is loaded inside Electron with the preload bridge available.
 
-# Future Expansion
+The `Create session` button in the dashboard currently uses a simulated session path for UI feedback. Real managed session creation is implemented through Discord commands.
 
-Potential features for future versions include:
+## Current Limitations
 
-- remote file browser
-- terminal streaming
-- process monitoring
-- AI command interpretation
-- multi-machine cluster control
-- encrypted command relay
-- remote system metrics
+- no packaging or installer flow yet
+- no database; config and runtime state are local only
+- no terminal output capture or live command streaming
+- no file browser or remote file editing
+- no granular permission model beyond authorized Discord IDs
+- no tests are included yet
 
----
+## Repo Layout
 
-# Example Use Cases
+- [src/app](/C:/Users/coler/Desktop/Backup/development/Siylo/src/app) contains the Next.js app shell
+- [src/components](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components) contains the dashboard UI
+- [src/main](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main) contains Electron, Discord, state, and session logic
+- [scripts](/C:/Users/coler/Desktop/Backup/development/Siylo/scripts) contains dev/start launch scripts
 
-### Remote Development
+## Status
 
-Run builds from your phone.
-
-
-@siylo cmd-1 npm run dev
-
-
----
-
-### Restart Servers
-
-
-@siylo restart
-
-
----
-
-### Debug Systems
-
-
-@siylo screenshot
-@siylo logs
-
-
----
-
-### Launch Tools
-
-
-@siylo open cursor
-@siylo open vscode
-
-
----
-
-# Summary
-
-Siylo turns Discord into a simple remote command interface for your computer.
-
-It runs quietly in the system tray and allows authorized users to interact with:
-
-- terminals
-- development environments
-- system utilities
-- local processes
-
-All through simple commands directed at:
-
-
-@siylo
+This repo is currently an early local-first prototype. The implemented path is strongest around tray control, Discord connectivity, Windows shell automation, screenshots, and a small dashboard for local configuration.
