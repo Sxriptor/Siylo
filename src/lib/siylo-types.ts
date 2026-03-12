@@ -12,6 +12,8 @@ export type SiyloSession = {
   status: "idle" | "active";
   lastCommand: string;
   createdAt: string;
+  pid?: number;
+  windowTitle?: string;
 };
 
 export type SiyloLogEntry = {

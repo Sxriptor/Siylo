@@ -106,6 +106,51 @@ function addSession(session) {
   return nextSession;
 }
 
+function getSession(sessionId) {
+  return state.sessions.find((session) => session.id.toLowerCase() === sessionId.toLowerCase()) || null;
+}
+
+function updateSession(sessionId, partialSession) {
+  let updatedSession = null;
+
+  state.sessions = state.sessions.map((session) => {
+    if (session.id.toLowerCase() !== sessionId.toLowerCase()) {
+      return session;
+    }
+
+    updatedSession = {
+      ...session,
+      ...partialSession
+    };
+
+    return updatedSession;
+  });
+
+  return updatedSession;
+}
+
+function removeSession(sessionId) {
+  const session = getSession(sessionId);
+  state.sessions = state.sessions.filter((entry) => entry.id.toLowerCase() !== sessionId.toLowerCase());
+  return session;
+}
+
+function clearSessions(predicate) {
+  const removedSessions = [];
+  const keepSessions = [];
+
+  for (const session of state.sessions) {
+    if (predicate(session)) {
+      removedSessions.push(session);
+    } else {
+      keepSessions.push(session);
+    }
+  }
+
+  state.sessions = keepSessions;
+  return removedSessions;
+}
+
 function simulateSession(commandText) {
   const sessionId = `cmd-${state.sessions.length + 1}`;
   const session = {
@@ -124,10 +169,14 @@ function simulateSession(commandText) {
 module.exports = {
   addSession,
   appendLog,
+  clearSessions,
   getStateSnapshot,
   initializeUpdateState,
+  getSession,
+  removeSession,
   setDiscordState,
   setUpdateState,
+  updateSession,
   updateConfig,
   simulateSession
 };
