@@ -56,6 +56,8 @@ async function createManagedSession(shell) {
   runtimeSessions.set(sessionId, {
     process: ptyProcess,
     pendingOutput: "",
+    recentOutput: "",
+    isBusy: false,
     closed: false
   });
 
@@ -65,7 +67,10 @@ async function createManagedSession(shell) {
       return;
     }
 
-    runtime.pendingOutput = `${runtime.pendingOutput}${stripAnsi(data)}`.slice(-24000);
+    const cleaned = stripAnsi(data);
+    runtime.pendingOutput = `${runtime.pendingOutput}${cleaned}`.slice(-24000);
+    runtime.recentOutput = `${runtime.recentOutput}${cleaned}`.slice(-4000);
+    runtime.isBusy = detectBusyState(runtime.recentOutput);
   });
 
   ptyProcess.onExit(({ exitCode }) => {
@@ -90,6 +95,7 @@ async function createManagedSession(shell) {
 async function sendCommandToSession(sessionId, commandText) {
   const session = requireSession(sessionId);
   const runtime = requireRuntimeSession(sessionId);
+  ensureSessionReadyForInput(sessionId, runtime);
 
   runtime.process.write(commandText);
   await delay(90);
@@ -99,6 +105,48 @@ async function sendCommandToSession(sessionId, commandText) {
     updateSession(sessionId, {
       status: "active",
       lastCommand: commandText
+    }) || session
+  );
+}
+
+async function sendTextToSession(sessionId, commandText) {
+  const session = requireSession(sessionId);
+  const runtime = requireRuntimeSession(sessionId);
+  ensureSessionReadyForInput(sessionId, runtime);
+
+  runtime.process.write(commandText);
+  await delay(90);
+  runtime.process.write("\r");
+
+  return (
+    updateSession(sessionId, {
+      status: "active",
+      lastCommand: commandText
+    }) || session
+  );
+}
+
+async function sendKeyToSession(sessionId, keyName) {
+  const session = requireSession(sessionId);
+  const runtime = requireRuntimeSession(sessionId);
+  const keyMap = {
+    enter: "\r",
+    esc: "\u001b",
+    "ctrl+c": "\u0003",
+    "ctrl+l": "\u000c"
+  };
+
+  const keyValue = keyMap[keyName.toLowerCase()];
+  if (!keyValue) {
+    throw new Error(`Unsupported key command: ${keyName}`);
+  }
+
+  runtime.process.write(keyValue);
+
+  return (
+    updateSession(sessionId, {
+      status: "active",
+      lastCommand: keyName.toLowerCase()
     }) || session
   );
 }
@@ -150,7 +198,7 @@ function drainPendingOutput(sessionId, maxLength = 1600) {
     return "";
   }
 
-  const output = runtime.pendingOutput.slice(-maxLength);
+  const output = compactTerminalOutput(runtime.pendingOutput).slice(-maxLength);
   runtime.pendingOutput = "";
   return output.trim();
 }
@@ -173,6 +221,14 @@ function requireRuntimeSession(sessionId) {
   return runtime;
 }
 
+function ensureSessionReadyForInput(sessionId, runtime) {
+  if (runtime.isBusy) {
+    throw new Error(
+      `Session ${sessionId} appears busy. Wait for the current run to finish or send \`${sessionId} ctrl+c\` first.`
+    );
+  }
+}
+
 function stripAnsi(value) {
   return value.replace(
     // eslint-disable-next-line no-control-regex
@@ -181,10 +237,95 @@ function stripAnsi(value) {
   );
 }
 
+function compactTerminalOutput(value) {
+  const normalized = value
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/\t/g, "  ");
+
+  const compactedLines = [];
+  let skipSpinnerBlock = false;
+
+  for (const rawLine of normalized.split("\n")) {
+    const line = rawLine.replace(/\s+$/g, "");
+    const trimmed = line.trim();
+    const previous = compactedLines[compactedLines.length - 1] || "";
+    const previousTrimmed = previous.trim();
+
+    if (containsTransientStatus(trimmed)) {
+      skipSpinnerBlock = true;
+      continue;
+    }
+
+    if (isSpinnerFragment(trimmed)) {
+      skipSpinnerBlock = true;
+      continue;
+    }
+
+    if (skipSpinnerBlock) {
+      if (!trimmed || isTransientStatusLine(trimmed) || isSpinnerFragment(trimmed)) {
+        continue;
+      }
+
+      skipSpinnerBlock = false;
+    }
+
+    if (!trimmed) {
+      if (previousTrimmed) {
+        compactedLines.push("");
+      }
+      continue;
+    }
+
+    if (trimmed === previousTrimmed) {
+      continue;
+    }
+
+    if (isTransientStatusLine(trimmed)) {
+      continue;
+    }
+
+    if (
+      trimmed.length <= 6 &&
+      previousTrimmed &&
+      (previousTrimmed.startsWith(trimmed) || trimmed.startsWith(previousTrimmed))
+    ) {
+      continue;
+    }
+
+    compactedLines.push(line);
+  }
+
+  return compactedLines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
 function delay(ms) {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isTransientStatusLine(value) {
+  return (
+    /^working(?:\s*\(\d+s.*\))?$/i.test(value) ||
+    /^running\s+/i.test(value) ||
+    /^explain this codebase$/i.test(value) ||
+    /^(w|wo|wor|work|worki|workin|working)$/i.test(value) ||
+    /^\d+$/.test(value)
+  );
+}
+
+function isSpinnerFragment(value) {
+  return /^(w|wo|wor|work|worki|workin|working|\d+|orking|rking|king|ing|ng|g)?$/i.test(value);
+}
+
+function containsTransientStatus(value) {
+  return /working\s*\(\d+s.*esc to interrupt/i.test(value) || /\bworking\b/i.test(value) && /\besc to interrupt\b/i.test(value);
+}
+
+function detectBusyState(value) {
+  const compact = value.toLowerCase();
+  return compact.includes("esc to interrupt") || /\bworking\s*\(\d+s/.test(compact);
 }
 
 function formatError(error) {
@@ -203,5 +344,7 @@ module.exports = {
   killAllManagedSessions,
   killSession,
   listManagedSessions,
-  sendCommandToSession
+  sendKeyToSession,
+  sendCommandToSession,
+  sendTextToSession
 };

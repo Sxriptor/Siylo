@@ -24,7 +24,9 @@ const {
   killAllManagedSessions,
   killSession,
   listManagedSessions,
-  sendCommandToSession
+  sendKeyToSession,
+  sendCommandToSession,
+  sendTextToSession
 } = require("./session-manager");
 
 let client = null;
@@ -327,6 +329,18 @@ async function dispatchCommand(message, commandText) {
     return;
   }
 
+  const typeMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+t\s+([\s\S]+)$/i);
+  if (typeMatch) {
+    await typeIntoSession(message, typeMatch[1], typeMatch[2]);
+    return;
+  }
+
+  const keyMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+(enter|esc|ctrl\+c|ctrl\+l)$/i);
+  if (keyMatch) {
+    await sendSessionKey(message, keyMatch[1], keyMatch[2]);
+    return;
+  }
+
   const sessionCommandMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+["']([\s\S]+)["']$/i);
   if (sessionCommandMatch) {
     await runSessionCommand(message, sessionCommandMatch[1], sessionCommandMatch[2]);
@@ -334,7 +348,7 @@ async function dispatchCommand(message, commandText) {
   }
 
   await message.reply(
-    "Unknown command. Supported commands: `list`, `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`, `cmd-1 \"codex\"`, `cmd-1 front`, `kill cmd-1`, `kill all`."
+    "Unknown command. Supported commands: `list`, `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`, `cmd-1 t explain the codebase`, `cmd-1 enter`, `cmd-1 esc`, `cmd-1 ctrl+c`, `cmd-1 front`, `kill cmd-1`, `kill all`."
   );
 }
 
@@ -425,6 +439,30 @@ async function runSessionCommand(message, sessionId, commandText) {
   } catch (error) {
     log("error", `Failed to send command to ${sessionId}: ${formatError(error)}`);
     await message.reply(`Failed to send command to ${sessionId}: ${formatError(error)}`);
+  }
+}
+
+async function typeIntoSession(message, sessionId, commandText) {
+  try {
+    await sendCommandToSession(sessionId, commandText);
+    ensureSessionStream(sessionId, message.channelId);
+    log("info", `Sent to ${sessionId}: ${commandText}`);
+    await message.reply(`Sent to ${sessionId}: ${commandText}`);
+  } catch (error) {
+    log("error", `Failed to send command to ${sessionId}: ${formatError(error)}`);
+    await message.reply(`Failed to send command to ${sessionId}: ${formatError(error)}`);
+  }
+}
+
+async function sendSessionKey(message, sessionId, keyName) {
+  try {
+    await sendKeyToSession(sessionId, keyName);
+    ensureSessionStream(sessionId, message.channelId);
+    log("info", `Sent key to ${sessionId}: ${keyName.toLowerCase()}`);
+    await message.reply(`Sent key to ${sessionId}: ${keyName.toLowerCase()}`);
+  } catch (error) {
+    log("error", `Failed to send key to ${sessionId}: ${formatError(error)}`);
+    await message.reply(`Failed to send key to ${sessionId}: ${formatError(error)}`);
   }
 }
 
