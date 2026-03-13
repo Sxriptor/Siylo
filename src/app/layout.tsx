@@ -5,9 +5,9 @@ export const metadata: Metadata = {
   title: "Siylo",
   description: "Discord-controlled local automation agent dashboard.",
   icons: {
-    icon: "/logo.ico",
-    shortcut: "/logo.ico",
-    apple: "/logo.png"
+    icon: "logo.ico",
+    shortcut: "logo.ico",
+    apple: "logo.png"
   }
 };
 
