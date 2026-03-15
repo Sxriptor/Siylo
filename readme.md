@@ -132,6 +132,8 @@ Implemented command set in [src/main/discord-service.js](/C:/Users/coler/Desktop
 - `kill all`
 - `kill <session-id>`
 - `<session-id> front`
+- `<session-id> k <key>`
+- `<session-id> t <raw text>`
 - `<session-id> "your command here"`
 
 Examples:
@@ -139,12 +141,15 @@ Examples:
 ```text
 @siylo open cmd
 @siylo cmd-1 "npm run dev"
+@siylo cmd-1 t git commit -m "fixed changes"
+@siylo cmd-1 k q
+@siylo cmd-1 k enter
 @siylo cmd-1 front
 @siylo list
 @siylo screenshot
 ```
 
-The session command format currently requires quotes around the forwarded command body.
+The `t` format forwards everything after `t ` as raw text, including embedded quotes, and always presses Enter after typing it.
 
 ## Managed Sessions
 

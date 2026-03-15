@@ -329,9 +329,22 @@ async function dispatchCommand(message, commandText) {
     return;
   }
 
-  const typeMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+t\s+([\s\S]+)$/i);
+  const typeMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+t(?:\s+|$)/i);
   if (typeMatch) {
-    await typeIntoSession(message, typeMatch[1], typeMatch[2]);
+    const sessionId = typeMatch[1];
+    const rawTypedText = trimmedCommand.slice(typeMatch[0].length);
+    if (!rawTypedText) {
+      await message.reply(`Nothing to type for ${sessionId}.`);
+      return;
+    }
+
+    await typeIntoSession(message, sessionId, rawTypedText);
+    return;
+  }
+
+  const keyCommandMatch = trimmedCommand.match(/^([a-z]+-\d+)\s+k\s+(\S+)$/i);
+  if (keyCommandMatch) {
+    await sendSessionKey(message, keyCommandMatch[1], keyCommandMatch[2]);
     return;
   }
 
@@ -348,7 +361,7 @@ async function dispatchCommand(message, commandText) {
   }
 
   await message.reply(
-    "Unknown command. Supported commands: `list`, `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`, `cmd-1 t explain the codebase`, `cmd-1 enter`, `cmd-1 esc`, `cmd-1 ctrl+c`, `cmd-1 front`, `kill cmd-1`, `kill all`."
+    "Unknown command. Supported commands: `list`, `logs`, `screenshot`, `restart`, `open cmd`, `open powershell`, `open cursor`, `open vscode`, `open kiro`, `cmd-1 t git commit -m \"fixed changes\"`, `cmd-1 k q`, `cmd-1 k enter`, `cmd-1 enter`, `cmd-1 esc`, `cmd-1 ctrl+c`, `cmd-1 front`, `kill cmd-1`, `kill all`."
   );
 }
 
@@ -444,7 +457,7 @@ async function runSessionCommand(message, sessionId, commandText) {
 
 async function typeIntoSession(message, sessionId, commandText) {
   try {
-    await sendCommandToSession(sessionId, commandText);
+    await sendTextToSession(sessionId, commandText);
     ensureSessionStream(sessionId, message.channelId);
     log("info", `Sent to ${sessionId}: ${commandText}`);
     await message.reply(`Sent to ${sessionId}: ${commandText}`);

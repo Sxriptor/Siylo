@@ -129,17 +129,7 @@ async function sendTextToSession(sessionId, commandText) {
 async function sendKeyToSession(sessionId, keyName) {
   const session = requireSession(sessionId);
   const runtime = requireRuntimeSession(sessionId);
-  const keyMap = {
-    enter: "\r",
-    esc: "\u001b",
-    "ctrl+c": "\u0003",
-    "ctrl+l": "\u000c"
-  };
-
-  const keyValue = keyMap[keyName.toLowerCase()];
-  if (!keyValue) {
-    throw new Error(`Unsupported key command: ${keyName}`);
-  }
+  const keyValue = normalizeKeyCommand(keyName);
 
   runtime.process.write(keyValue);
 
@@ -305,22 +295,79 @@ function delay(ms) {
   });
 }
 
+function normalizeKeyCommand(keyName) {
+  const rawKey = String(keyName || "").trim();
+  if (!rawKey) {
+    throw new Error("Key command cannot be empty.");
+  }
+
+  if (rawKey.length === 1) {
+    return rawKey;
+  }
+
+  const keyMap = {
+    enter: "\r",
+    return: "\r",
+    esc: "\u001b",
+    escape: "\u001b",
+    tab: "\t",
+    space: " ",
+    backspace: "\b",
+    delete: "\u007f",
+    up: "\u001b[A",
+    down: "\u001b[B",
+    right: "\u001b[C",
+    left: "\u001b[D",
+    "ctrl+c": "\u0003",
+    "ctrl+l": "\u000c",
+    "ctrl+d": "\u0004",
+    "ctrl+z": "\u001a"
+  };
+
+  const normalizedKey = rawKey.toLowerCase();
+  const mappedKey = keyMap[normalizedKey];
+  if (!mappedKey) {
+    throw new Error(`Unsupported key command: ${keyName}`);
+  }
+
+  return mappedKey;
+}
+
 function isTransientStatusLine(value) {
+  const normalized = value.trim().toLowerCase();
   return (
     /^working(?:\s*\(\d+s.*\))?$/i.test(value) ||
     /^running\s+/i.test(value) ||
     /^explain this codebase$/i.test(value) ||
-    /^(w|wo|wor|work|worki|workin|working)$/i.test(value) ||
-    /^\d+$/.test(value)
+    isSpinnerFragment(normalized) ||
+    isRepeatedSpinnerNoise(normalized) ||
+    /^\d+$/.test(normalized)
   );
 }
 
 function isSpinnerFragment(value) {
-  return /^(w|wo|wor|work|worki|workin|working|\d+|orking|rking|king|ing|ng|g)?$/i.test(value);
+  return /^(w|wo|wor|work|worki|workin|working|orking|rking|king|ing|ng|g|\d+)?$/i.test(value);
+}
+
+function isRepeatedSpinnerNoise(value) {
+  if (!value) {
+    return false;
+  }
+
+  const tokens = value.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) {
+    return false;
+  }
+
+  return tokens.every((token) => isSpinnerFragment(token) || token === "working");
 }
 
 function containsTransientStatus(value) {
-  return /working\s*\(\d+s.*esc to interrupt/i.test(value) || /\bworking\b/i.test(value) && /\besc to interrupt\b/i.test(value);
+  return (
+    /working\s*\(\d+s.*esc to interrupt/i.test(value) ||
+    (/\bworking\b/i.test(value) && /\besc to interrupt\b/i.test(value)) ||
+    isRepeatedSpinnerNoise(value.trim().toLowerCase())
+  );
 }
 
 function detectBusyState(value) {
