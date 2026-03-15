@@ -71,6 +71,10 @@ async function createManagedSession(shell) {
     runtime.pendingOutput = `${runtime.pendingOutput}${cleaned}`.slice(-24000);
     runtime.recentOutput = `${runtime.recentOutput}${cleaned}`.slice(-4000);
     runtime.isBusy = detectBusyState(runtime.recentOutput);
+
+    if (!runtime.isBusy && hasInteractivePrompt(runtime.recentOutput)) {
+      runtime.recentOutput = runtime.recentOutput.slice(-800);
+    }
   });
 
   ptyProcess.onExit(({ exitCode }) => {
@@ -247,13 +251,13 @@ function compactTerminalOutput(value) {
       continue;
     }
 
-    if (isSpinnerFragment(trimmed)) {
+    if (isSpinnerFragment(trimmed) || isCodexNoiseLine(trimmed)) {
       skipSpinnerBlock = true;
       continue;
     }
 
     if (skipSpinnerBlock) {
-      if (!trimmed || isTransientStatusLine(trimmed) || isSpinnerFragment(trimmed)) {
+      if (!trimmed || isTransientStatusLine(trimmed) || isSpinnerFragment(trimmed) || isCodexNoiseLine(trimmed)) {
         continue;
       }
 
@@ -272,6 +276,10 @@ function compactTerminalOutput(value) {
     }
 
     if (isTransientStatusLine(trimmed)) {
+      continue;
+    }
+
+    if (isCodexNoiseLine(trimmed)) {
       continue;
     }
 
@@ -336,9 +344,10 @@ function normalizeKeyCommand(keyName) {
 function isTransientStatusLine(value) {
   const normalized = value.trim().toLowerCase();
   return (
-    /^working(?:\s*\(\d+s.*\))?$/i.test(value) ||
+    /^working\d*(?:\s*\(\d+s.*\))?$/i.test(value) ||
     /^running\s+/i.test(value) ||
     /^explain this codebase$/i.test(value) ||
+    isCodexCliStatusLine(normalized) ||
     isSpinnerFragment(normalized) ||
     isRepeatedSpinnerNoise(normalized) ||
     /^\d+$/.test(normalized)
@@ -346,7 +355,7 @@ function isTransientStatusLine(value) {
 }
 
 function isSpinnerFragment(value) {
-  return /^(w|wo|wor|work|worki|workin|working|orking|rking|king|ing|ng|g|\d+)?$/i.test(value);
+  return /^(w|wo|wor|work|worki|workin|working\d*|orking|rking|king|ing|ng|g|\d+)?$/i.test(value);
 }
 
 function isRepeatedSpinnerNoise(value) {
@@ -364,15 +373,51 @@ function isRepeatedSpinnerNoise(value) {
 
 function containsTransientStatus(value) {
   return (
-    /working\s*\(\d+s.*esc to interrupt/i.test(value) ||
+    /working\d*\s*\(\d+s.*esc to interrupt/i.test(value) ||
     (/\bworking\b/i.test(value) && /\besc to interrupt\b/i.test(value)) ||
+    isCodexCliStatusLine(value.trim().toLowerCase()) ||
     isRepeatedSpinnerNoise(value.trim().toLowerCase())
+  );
+}
+
+function isCodexCliStatusLine(value) {
+  return (
+    /^working\d*$/.test(value) ||
+    /^gpt-[\w.-]+\s+(low|medium|high)(?:\s+\d+%\s+left)?\s+~?\\/.test(value) ||
+    /^gpt-[\w.-]+\s+(low|medium|high)(?:\s+\d+%\s+left)?\s+[a-z]:\\/.test(value) ||
+    /^implement\s+\{[^}]+\}$/.test(value)
   );
 }
 
 function detectBusyState(value) {
   const compact = value.toLowerCase();
-  return compact.includes("esc to interrupt") || /\bworking\s*\(\d+s/.test(compact);
+  if (hasInteractivePrompt(compact) || hasCompletionFooter(compact)) {
+    return false;
+  }
+
+  return (
+    compact.includes("esc to interrupt") ||
+    /\bworking\d*\s*\(\d+s/.test(compact) ||
+    /^working\d*$/m.test(compact)
+  );
+}
+
+function isCodexNoiseLine(value) {
+  const normalized = value.trim().toLowerCase();
+  return (
+    isCodexCliStatusLine(normalized) ||
+    /^explain this codebase$/.test(normalized) ||
+    /^token usage:\s+total=/i.test(normalized) ||
+    /^to continue this session,\s+run codex resume /i.test(normalized)
+  );
+}
+
+function hasCompletionFooter(value) {
+  return /token usage:\s+total=/i.test(value) || /to continue this session,\s+run codex resume /i.test(value);
+}
+
+function hasInteractivePrompt(value) {
+  return /(?:^|\n)(?:ps\s+)?[a-z]:\\[^\n>]*>\s*$/im.test(value) || /(?:^|\n)~\\[^\n>]*>\s*$/im.test(value);
 }
 
 function formatError(error) {
