@@ -28,28 +28,34 @@ function getNextSessionId(shell) {
   return `${prefix}-${nextNumber}`;
 }
 
-async function createManagedSession(shell) {
+async function createManagedSession(shell, options = {}) {
   const normalizedShell = shell.toLowerCase();
-  if (!["cmd", "powershell"].includes(normalizedShell)) {
-    throw new Error(`Managed sessions are only supported for cmd and powershell. Received: ${shell}`);
+  const runtimeShell = (options.runtimeShell || normalizedShell).toLowerCase();
+  const displayShell = (options.displayShell || normalizedShell).toLowerCase();
+  if (!["cmd", "powershell"].includes(runtimeShell)) {
+    throw new Error(`Managed sessions are only supported for cmd and powershell runtimes. Received: ${runtimeShell}`);
   }
 
-  const sessionId = getNextSessionId(normalizedShell);
-  const executable = normalizedShell === "cmd" ? "cmd.exe" : "powershell.exe";
-  const args = normalizedShell === "cmd" ? [] : ["-NoLogo"];
+  const sessionId = options.sessionId || getNextSessionId(displayShell);
+  if (runtimeSessions.has(sessionId)) {
+    throw new Error(`Session already exists: ${sessionId}`);
+  }
+
+  const executable = options.executable || (runtimeShell === "cmd" ? "cmd.exe" : "powershell.exe");
+  const args = Array.isArray(options.args) ? options.args : runtimeShell === "cmd" ? [] : ["-NoLogo"];
   const ptyProcess = pty.spawn(executable, args, {
     name: "xterm-color",
-    cwd: process.cwd(),
-    env: process.env,
-    cols: 120,
-    rows: 30
+    cwd: options.cwd || process.cwd(),
+    env: options.env || process.env,
+    cols: options.cols || 120,
+    rows: options.rows || 30
   });
 
   const session = addSession({
     id: sessionId,
-    shell: normalizedShell,
+    shell: displayShell,
     status: "active",
-    lastCommand: `open ${normalizedShell}`,
+    lastCommand: options.startupCommand || `open ${displayShell}`,
     pid: ptyProcess.pid
   });
 
@@ -91,6 +97,13 @@ async function createManagedSession(shell) {
       });
     }
   });
+
+  if (options.startupCommand) {
+    await delay(options.startupDelayMs ?? 220);
+    ptyProcess.write(options.startupCommand);
+    await delay(90);
+    ptyProcess.write("\r");
+  }
 
   appendLog("info", `Managed PTY session created: ${session.id} (PID ${ptyProcess.pid}).`);
   return session;
@@ -181,9 +194,11 @@ async function killAllManagedSessions() {
 }
 
 function listManagedSessions() {
-  return getStateSnapshot().sessions.filter((session) =>
-    ["cmd", "powershell"].includes(session.shell.toLowerCase())
-  );
+  return getStateSnapshot().sessions.filter((session) => runtimeSessions.has(session.id));
+}
+
+function hasManagedSession(sessionId) {
+  return runtimeSessions.has(sessionId);
 }
 
 function drainPendingOutput(sessionId, maxLength = 1600) {
@@ -436,6 +451,7 @@ module.exports = {
   killAllManagedSessions,
   killSession,
   listManagedSessions,
+  hasManagedSession,
   sendKeyToSession,
   sendCommandToSession,
   sendTextToSession

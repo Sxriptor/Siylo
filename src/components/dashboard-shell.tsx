@@ -16,6 +16,22 @@ const browserFallbackState: SiyloState = {
     botTag: "",
     lastError: ""
   },
+  voice: {
+    status: "stopped",
+    port: 3210,
+    url: "http://127.0.0.1:3210",
+    provider: "unconfigured",
+    lastError: ""
+  },
+  remoteAccess: {
+    status: "stopped",
+    port: 3443,
+    url: "http://localhost:3443/radio",
+    localUrls: ["http://localhost:3443/radio"],
+    username: "",
+    authConfigured: false,
+    lastError: ""
+  },
   update: {
     status: "disabled",
     currentVersion: "0.1.0",
@@ -30,6 +46,11 @@ const browserFallbackState: SiyloState = {
     botToken: "",
     authorizedUsers: ["123456789012345678", "987654321098765432"],
     dashboardPort: 3000,
+    voiceServerPort: 3210,
+    remoteAccessEnabled: false,
+    remoteAccessPort: 3443,
+    remoteAccessUsername: "",
+    remoteAccessPasswordConfigured: false,
     autoConnect: false,
     commandPrefix: "@siylo"
   },
@@ -58,6 +79,10 @@ export function DashboardShell() {
   const [machineName, setMachineName] = useState("Local machine");
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
   const [botTokenInput, setBotTokenInput] = useState("");
+  const [remoteAccessUsernameInput, setRemoteAccessUsernameInput] = useState("");
+  const [remoteAccessPasswordInput, setRemoteAccessPasswordInput] = useState("");
+  const [remoteAccessPortInput, setRemoteAccessPortInput] = useState("3443");
+  const [remoteAccessEnabled, setRemoteAccessEnabled] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
@@ -93,8 +118,23 @@ export function DashboardShell() {
 
   useEffect(() => {
     setAuthorizedUsersInput(state.config.authorizedUsers.join("\n"));
+  }, [state.config.authorizedUsers]);
+
+  useEffect(() => {
     setBotTokenInput(state.config.botToken);
-  }, [state]);
+  }, [state.config.botToken]);
+
+  useEffect(() => {
+    setRemoteAccessUsernameInput(state.config.remoteAccessUsername);
+  }, [state.config.remoteAccessUsername]);
+
+  useEffect(() => {
+    setRemoteAccessPortInput(String(state.config.remoteAccessPort));
+  }, [state.config.remoteAccessPort]);
+
+  useEffect(() => {
+    setRemoteAccessEnabled(state.config.remoteAccessEnabled);
+  }, [state.config.remoteAccessEnabled]);
 
   const commandExamples = useMemo(() => {
     const prefix = state?.config.commandPrefix || "@siylo";
@@ -130,6 +170,19 @@ export function DashboardShell() {
         hint: "Discord IDs allowed to control this machine."
       },
       {
+        label: "Voice backend",
+        value: state.voice.status,
+        hint: state.voice.url || state.voice.lastError || "Local speech execution service is idle."
+      },
+      {
+        label: "Remote access",
+        value: state.remoteAccess.status,
+        hint:
+          state.remoteAccess.url ||
+          state.remoteAccess.lastError ||
+          "Tunnel-only remote access is currently disabled."
+      },
+      {
         label: "Discord bot token",
         value: state.config.botToken ? "Stored" : "Missing",
         hint: "Used to connect the local agent to the Discord gateway."
@@ -151,11 +204,29 @@ export function DashboardShell() {
   }, [state]);
 
   const currentState = state;
-  const agentState = currentState.isConnected ? "running" : "stopped";
+  const isDiscordActive =
+    currentState.discord.status === "connecting" || currentState.discord.status === "connected";
+  const isRemoteAccessActive =
+    currentState.remoteAccess.status === "starting" || currentState.remoteAccess.status === "listening";
+  const isAgentActive = isDiscordActive || isRemoteAccessActive;
+  const agentState =
+    isDiscordActive && isRemoteAccessActive
+      ? "running"
+      : isDiscordActive
+        ? currentState.discord.status === "connected"
+          ? "running"
+          : "starting"
+        : currentState.remoteAccess.status === "listening"
+          ? "running"
+          : currentState.remoteAccess.status === "starting"
+            ? "starting"
+            : "stopped";
   const connectionLabel =
-    currentState.discord.status === "connected"
-      ? currentState.discord.botTag || "Connected"
-      : currentState.discord.status;
+    isRemoteAccessActive
+      ? currentState.remoteAccess.url || "Remote access live"
+      : isDiscordActive
+        ? currentState.discord.botTag || currentState.discord.status
+        : currentState.remoteAccess.lastError || currentState.discord.lastError || "stopped";
   const latestLog = currentState.logs[0]?.timestamp
     ? formatTimestamp(currentState.logs[0].timestamp)
     : "Awaiting activity";
@@ -165,7 +236,7 @@ export function DashboardShell() {
       return;
     }
 
-    if (currentState.isConnected) {
+    if (isAgentActive) {
       const nextState = await window.siylo.stop();
       setState(nextState);
       return;
@@ -188,10 +259,15 @@ export function DashboardShell() {
         authorizedUsers: authorizedUsersInput
           .split(/\r?\n/)
           .map((value) => value.trim())
-          .filter(Boolean)
+          .filter(Boolean),
+        remoteAccessEnabled,
+        remoteAccessPort: Number(remoteAccessPortInput) || state.config.remoteAccessPort,
+        remoteAccessUsername: remoteAccessUsernameInput.trim(),
+        remoteAccessPassword: remoteAccessPasswordInput
       });
 
       setState(nextState);
+      setRemoteAccessPasswordInput("");
     } finally {
       setIsSaving(false);
     }
@@ -263,7 +339,7 @@ export function DashboardShell() {
         </div>
         <div className="heroGrid">
           <Metric label="Agent state" value={agentState} accent />
-          <Metric label="Discord" value={connectionLabel} />
+          <Metric label="Remote access" value={connectionLabel} />
           <Metric label="Latest event" value={latestLog} />
           <Metric label="Machine" value={machineName} />
         </div>
@@ -277,8 +353,12 @@ export function DashboardShell() {
           <dl className="stackList">
             <Row label="Bot mention" value={currentState.config.commandPrefix} />
             <Row
-              label="Command intake"
-              value={currentState.isConnected ? "Authorized mentions only" : "Paused"}
+              label="Discord"
+              value={isDiscordActive ? currentState.discord.status : "Stopped"}
+            />
+            <Row
+              label="Remote access"
+              value={isRemoteAccessActive ? currentState.remoteAccess.status : "Stopped"}
             />
             <Row label="Tray mode" value="Primary control surface" />
             <Row
@@ -288,7 +368,7 @@ export function DashboardShell() {
           </dl>
           <div className="actionRow">
             <button className="actionButton" onClick={handleStartStop} disabled={!isDesktop}>
-              {currentState.isConnected ? "Stop agent" : "Start agent"}
+              {isAgentActive ? "Stop agent" : "Start agent"}
             </button>
             <button
               className="actionButton secondary"
@@ -356,6 +436,94 @@ export function DashboardShell() {
       </section>
 
       <section className="grid twoCol">
+        <Panel
+          title="Remote access"
+          description="Loopback-only origin for a named Cloudflare Tunnel with Cloudflare Access in front."
+        >
+          <label className="fieldLabel" htmlFor="remote-access-enabled">
+            Remote access mode
+          </label>
+          <select
+            id="remote-access-enabled"
+            className="textInput"
+            value={remoteAccessEnabled ? "enabled" : "disabled"}
+            disabled={!isDesktop}
+            onChange={(event) => setRemoteAccessEnabled(event.target.value === "enabled")}
+          >
+            <option value="disabled">Disabled</option>
+            <option value="enabled">Enabled</option>
+          </select>
+          <label className="fieldLabel" htmlFor="remote-access-username">
+            Remote username
+          </label>
+          <input
+            id="remote-access-username"
+            className="textInput"
+            type="text"
+            value={remoteAccessUsernameInput}
+            disabled={!isDesktop}
+            placeholder="Phone login username"
+            onChange={(event) => setRemoteAccessUsernameInput(event.target.value)}
+          />
+          <label className="fieldLabel" htmlFor="remote-access-password">
+            Remote password
+          </label>
+          <input
+            id="remote-access-password"
+            className="textInput"
+            type="password"
+            value={remoteAccessPasswordInput}
+            disabled={!isDesktop}
+            placeholder={
+              currentState.config.remoteAccessPasswordConfigured
+                ? "Leave blank to keep the existing password"
+                : "Set a strong password"
+            }
+            onChange={(event) => setRemoteAccessPasswordInput(event.target.value)}
+          />
+          <label className="fieldLabel" htmlFor="remote-access-port">
+            Remote HTTPS port
+          </label>
+          <input
+            id="remote-access-port"
+            className="textInput"
+            type="number"
+            min={1}
+            max={65535}
+            value={remoteAccessPortInput}
+            disabled={!isDesktop}
+            onChange={(event) => setRemoteAccessPortInput(event.target.value)}
+          />
+          <div className="pillWrap">
+            {currentState.remoteAccess.localUrls.map((remoteUrl) => (
+              <span key={remoteUrl} className="pill">
+                {remoteUrl}
+              </span>
+            ))}
+          </div>
+          <p className="muted">
+            Status: {currentState.remoteAccess.status}. App auth configured:{" "}
+            {currentState.remoteAccess.authConfigured ? "Yes" : "No"}.
+          </p>
+          <p className="muted">
+            Public access should go through a named Cloudflare Tunnel pointed at
+            {" "}
+            <code>{`http://localhost:${currentState.config.remoteAccessPort}`}</code>.
+          </p>
+          <p className="muted">
+            Do not port-forward `3443` or `3210`. Put Cloudflare Access in front of the tunnel hostname.
+          </p>
+          <div className="actionRow">
+            <button
+              className="actionButton"
+              onClick={handleSaveConfig}
+              disabled={!isDesktop || isSaving}
+            >
+              {isSaving ? "Saving..." : "Save remote access"}
+            </button>
+          </div>
+        </Panel>
+
         <Panel
           title="Command examples"
           description="Simple mention-first commands aligned with the README."

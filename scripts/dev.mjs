@@ -4,6 +4,7 @@ import process from "node:process";
 import net from "node:net";
 
 const rendererUrl = "http://127.0.0.1:3000";
+const rendererHost = process.env.SIYLO_RENDERER_HOST || "0.0.0.0";
 const nextBin = path.resolve(
   process.cwd(),
   "node_modules",
@@ -88,7 +89,9 @@ function shutdown(code = 0) {
 process.on("SIGINT", () => shutdown(0));
 process.on("SIGTERM", () => shutdown(0));
 
-run(nextBin, ["dev", "--hostname", "127.0.0.1", "--port", "3000"]);
+run(nextBin, ["dev", "--hostname", rendererHost, "--port", "3000"], {
+  SIYLO_VOICE_HOST: process.env.SIYLO_VOICE_HOST || "0.0.0.0"
+});
 
 try {
   await waitForPort(3000);

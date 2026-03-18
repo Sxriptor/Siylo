@@ -2,8 +2,17 @@ export type SiyloConfig = {
   botToken: string;
   authorizedUsers: string[];
   dashboardPort: number;
+  voiceServerPort: number;
+  remoteAccessEnabled: boolean;
+  remoteAccessPort: number;
+  remoteAccessUsername: string;
+  remoteAccessPasswordConfigured: boolean;
   autoConnect: boolean;
   commandPrefix: string;
+};
+
+export type SiyloConfigUpdate = Partial<SiyloConfig> & {
+  remoteAccessPassword?: string;
 };
 
 export type SiyloSession = {
@@ -29,6 +38,24 @@ export type SiyloDiscordState = {
   lastError: string;
 };
 
+export type SiyloVoiceState = {
+  status: "stopped" | "starting" | "listening" | "error";
+  port: number;
+  url: string;
+  provider: string;
+  lastError: string;
+};
+
+export type SiyloRemoteAccessState = {
+  status: "stopped" | "starting" | "listening" | "error";
+  port: number;
+  url: string;
+  localUrls: string[];
+  username: string;
+  authConfigured: boolean;
+  lastError: string;
+};
+
 export type SiyloUpdateState = {
   status: "idle" | "checking" | "available" | "downloading" | "downloaded" | "error" | "disabled";
   currentVersion: string;
@@ -43,6 +70,8 @@ export type SiyloUpdateState = {
 export type SiyloState = {
   isConnected: boolean;
   discord: SiyloDiscordState;
+  voice: SiyloVoiceState;
+  remoteAccess: SiyloRemoteAccessState;
   update: SiyloUpdateState;
   config: SiyloConfig;
   sessions: SiyloSession[];
@@ -55,7 +84,7 @@ export type SiyloBridge = {
   stop: () => Promise<SiyloState>;
   checkForUpdates: () => Promise<SiyloState>;
   installUpdate: () => Promise<SiyloState>;
-  updateConfig: (partialConfig: Partial<SiyloConfig>) => Promise<SiyloState>;
+  updateConfig: (partialConfig: SiyloConfigUpdate) => Promise<SiyloState>;
   simulateSession: (commandText: string) => Promise<SiyloState>;
   openDashboard: () => Promise<void>;
   onStateChanged: (listener: (state: SiyloState) => void) => () => void;

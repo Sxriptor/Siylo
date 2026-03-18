@@ -6,6 +6,12 @@ const defaultConfig = {
   botToken: "",
   authorizedUsers: [],
   dashboardPort: 3000,
+  voiceServerPort: 3210,
+  remoteAccessEnabled: false,
+  remoteAccessPort: 3443,
+  remoteAccessUsername: "",
+  remoteAccessPasswordHash: "",
+  remoteAccessPasswordSalt: "",
   autoConnect: false,
   commandPrefix: "@siylo"
 };
