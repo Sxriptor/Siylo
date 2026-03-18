@@ -79,8 +79,6 @@ export function DashboardShell() {
   const [machineName, setMachineName] = useState("Local machine");
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
   const [botTokenInput, setBotTokenInput] = useState("");
-  const [remoteAccessUsernameInput, setRemoteAccessUsernameInput] = useState("");
-  const [remoteAccessPasswordInput, setRemoteAccessPasswordInput] = useState("");
   const [remoteAccessPortInput, setRemoteAccessPortInput] = useState("3443");
   const [remoteAccessEnabled, setRemoteAccessEnabled] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -123,10 +121,6 @@ export function DashboardShell() {
   useEffect(() => {
     setBotTokenInput(state.config.botToken);
   }, [state.config.botToken]);
-
-  useEffect(() => {
-    setRemoteAccessUsernameInput(state.config.remoteAccessUsername);
-  }, [state.config.remoteAccessUsername]);
 
   useEffect(() => {
     setRemoteAccessPortInput(String(state.config.remoteAccessPort));
@@ -261,13 +255,10 @@ export function DashboardShell() {
           .map((value) => value.trim())
           .filter(Boolean),
         remoteAccessEnabled,
-        remoteAccessPort: Number(remoteAccessPortInput) || state.config.remoteAccessPort,
-        remoteAccessUsername: remoteAccessUsernameInput.trim(),
-        remoteAccessPassword: remoteAccessPasswordInput
+        remoteAccessPort: Number(remoteAccessPortInput) || state.config.remoteAccessPort
       });
 
       setState(nextState);
-      setRemoteAccessPasswordInput("");
     } finally {
       setIsSaving(false);
     }
@@ -438,7 +429,7 @@ export function DashboardShell() {
       <section className="grid twoCol">
         <Panel
           title="Remote access"
-          description="Loopback-only origin for a named Cloudflare Tunnel with Cloudflare Access in front."
+          description="Loopback-only origin for a named Cloudflare Tunnel. Public auth should be handled by Cloudflare Access."
         >
           <label className="fieldLabel" htmlFor="remote-access-enabled">
             Remote access mode
@@ -453,34 +444,6 @@ export function DashboardShell() {
             <option value="disabled">Disabled</option>
             <option value="enabled">Enabled</option>
           </select>
-          <label className="fieldLabel" htmlFor="remote-access-username">
-            Remote username
-          </label>
-          <input
-            id="remote-access-username"
-            className="textInput"
-            type="text"
-            value={remoteAccessUsernameInput}
-            disabled={!isDesktop}
-            placeholder="Phone login username"
-            onChange={(event) => setRemoteAccessUsernameInput(event.target.value)}
-          />
-          <label className="fieldLabel" htmlFor="remote-access-password">
-            Remote password
-          </label>
-          <input
-            id="remote-access-password"
-            className="textInput"
-            type="password"
-            value={remoteAccessPasswordInput}
-            disabled={!isDesktop}
-            placeholder={
-              currentState.config.remoteAccessPasswordConfigured
-                ? "Leave blank to keep the existing password"
-                : "Set a strong password"
-            }
-            onChange={(event) => setRemoteAccessPasswordInput(event.target.value)}
-          />
           <label className="fieldLabel" htmlFor="remote-access-port">
             Remote HTTPS port
           </label>
@@ -502,8 +465,7 @@ export function DashboardShell() {
             ))}
           </div>
           <p className="muted">
-            Status: {currentState.remoteAccess.status}. App auth configured:{" "}
-            {currentState.remoteAccess.authConfigured ? "Yes" : "No"}.
+            Status: {currentState.remoteAccess.status}. Local proxy stays loopback-only.
           </p>
           <p className="muted">
             Public access should go through a named Cloudflare Tunnel pointed at
@@ -511,7 +473,7 @@ export function DashboardShell() {
             <code>{`http://localhost:${currentState.config.remoteAccessPort}`}</code>.
           </p>
           <p className="muted">
-            Do not port-forward `3443` or `3210`. Put Cloudflare Access in front of the tunnel hostname.
+            Do not port-forward `3443` or `3210`. Put Cloudflare Access in front of the tunnel hostname and use that as the only public auth layer.
           </p>
           <div className="actionRow">
             <button

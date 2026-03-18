@@ -1,4 +1,6 @@
+const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const path = require("node:path");
 const { URL } = require("node:url");
 const {
@@ -7,11 +9,9 @@ const {
   getStateSnapshot,
   setRemoteAccessState
 } = require("./state");
-const { timingSafeCompare, verifySecret } = require("./security-utils");
 
 let remoteAccessServer = null;
 let currentOptions = null;
-const failedAuthAttempts = new Map();
 
 async function startRemoteAccessServer(options = {}) {
   currentOptions = {
@@ -22,17 +22,6 @@ async function startRemoteAccessServer(options = {}) {
   const config = getConfig();
   const port = resolveRemoteAccessPort();
   const localUrls = listRemoteAccessUrls(port);
-
-  if (!config.remoteAccessUsername || !config.remoteAccessPasswordHash || !config.remoteAccessPasswordSalt) {
-    setRemoteAccessState({
-      status: "error",
-      port,
-      url: localUrls[0] || "",
-      localUrls,
-      lastError: "Set a remote access username and password before enabling tunnel access."
-    });
-    return getStateSnapshot().remoteAccess;
-  }
 
   if (remoteAccessServer) {
     return getStateSnapshot().remoteAccess;
@@ -113,7 +102,6 @@ async function stopRemoteAccessServer() {
 
   const activeServer = remoteAccessServer;
   remoteAccessServer = null;
-  failedAuthAttempts.clear();
 
   await new Promise((resolve, reject) => {
     activeServer.close((error) => {
@@ -159,23 +147,6 @@ async function handleRemoteAccessRequest(request, response) {
     return;
   }
 
-  const authResult = authorizeRequest(request);
-  if (!authResult.authorized) {
-    if (authResult.statusCode === 429) {
-      sendText(response, 429, authResult.message, {
-        "Retry-After": String(Math.max(1, Math.ceil((authResult.retryAfterMs || 1000) / 1000)))
-      });
-      return;
-    }
-
-    response.writeHead(401, {
-      "Content-Type": "text/plain; charset=utf-8",
-      "WWW-Authenticate": 'Basic realm="Siylo Remote", charset="UTF-8"'
-    });
-    response.end(authResult.message);
-    return;
-  }
-
   if (requestUrl.pathname === "/health" || requestUrl.pathname === "/voice") {
     await proxyRequest(request, response, buildVoiceProxyUrl(requestUrl));
     return;
@@ -187,84 +158,6 @@ async function handleRemoteAccessRequest(request, response) {
   }
 
   await serveStaticRequest(request, response, requestUrl);
-}
-
-function authorizeRequest(request) {
-  const clientAddress = normalizeRemoteAddress(request.socket.remoteAddress);
-  const attemptState = failedAuthAttempts.get(clientAddress);
-
-  if (attemptState?.blockedUntil && attemptState.blockedUntil > Date.now()) {
-    return {
-      authorized: false,
-      statusCode: 429,
-      message: "Too many failed login attempts. Try again shortly.",
-      retryAfterMs: attemptState.blockedUntil - Date.now()
-    };
-  }
-
-  const authorizationHeader = String(request.headers.authorization || "");
-  if (!authorizationHeader.startsWith("Basic ")) {
-    return {
-      authorized: false,
-      statusCode: 401,
-      message: "Remote access credentials are required."
-    };
-  }
-
-  let username = "";
-  let password = "";
-
-  try {
-    const decodedValue = Buffer.from(authorizationHeader.slice(6), "base64").toString("utf8");
-    const separatorIndex = decodedValue.indexOf(":");
-    username = separatorIndex >= 0 ? decodedValue.slice(0, separatorIndex) : decodedValue;
-    password = separatorIndex >= 0 ? decodedValue.slice(separatorIndex + 1) : "";
-  } catch {
-    recordFailedAttempt(clientAddress);
-    return {
-      authorized: false,
-      statusCode: 401,
-      message: "Remote access credentials were malformed."
-    };
-  }
-
-  const config = getConfig();
-  const usernameMatches = timingSafeCompare(username, config.remoteAccessUsername);
-  const passwordMatches = verifySecret(
-    password,
-    config.remoteAccessPasswordHash,
-    config.remoteAccessPasswordSalt
-  );
-
-  if (!usernameMatches || !passwordMatches) {
-    recordFailedAttempt(clientAddress);
-    return {
-      authorized: false,
-      statusCode: 401,
-      message: "Remote access credentials were rejected."
-    };
-  }
-
-  failedAuthAttempts.delete(clientAddress);
-  return {
-    authorized: true,
-    statusCode: 200,
-    message: ""
-  };
-}
-
-function recordFailedAttempt(clientAddress) {
-  const existingState = failedAuthAttempts.get(clientAddress) || {
-    count: 0,
-    blockedUntil: 0
-  };
-  const nextCount = existingState.count + 1;
-  const blockedUntil = nextCount >= 6 ? Date.now() + 5 * 60 * 1000 : 0;
-
-  failedAuthAttempts.set(clientAddress, {
-    count: blockedUntil ? 0 : nextCount,
-    blockedUntil
-  });
 }
 
 function buildVoiceProxyUrl(requestUrl) {
@@ -398,11 +291,6 @@ function listRemoteAccessUrls(port) {
 function resolveRemoteAccessPort() {
   const configuredPort = Number(getConfig().remoteAccessPort || 3443);
   return Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : 3443;
-}
-
-function normalizeRemoteAddress(value) {
-  const normalized = String(value || "").trim();
-  return normalized.startsWith("::ffff:") ? normalized.slice(7) : normalized || "unknown";
 }
 
 function getContentType(filePath) {

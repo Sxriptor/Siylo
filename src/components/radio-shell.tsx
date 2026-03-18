@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
 const DEFAULT_SESSION_IDS = ["cmd-1", "cmd-2", "cursor", "codex"];
+const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
 const SESSION_STORAGE_KEY = "siylo-radio-session-id";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
@@ -38,6 +39,7 @@ export function RadioShell() {
   const [currentSessionId, setCurrentSessionId] = useState(DEFAULT_SESSION_IDS[0]);
   const [voiceApiBase, setVoiceApiBase] = useState("");
   const [status, setStatus] = useState<RadioStatus>("idle");
+  const [isLauncherOpen, setIsLauncherOpen] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -45,7 +47,7 @@ export function RadioShell() {
   const activePointerIdRef = useRef<number | null>(null);
   const holdTimerRef = useRef<number | null>(null);
   const holdStartedRef = useRef(false);
-  const pressSessionIdRef = useRef<string | null>(null);
+  const pressTargetRef = useRef<string | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionIdsRef = useRef(sessionIds);
 
@@ -160,6 +162,7 @@ export function RadioShell() {
     }
 
     activePointerIdRef.current = pointerId;
+    setIsLauncherOpen(false);
 
     try {
       const stream = await getOrCreateStream(streamRef);
@@ -211,12 +214,18 @@ export function RadioShell() {
       return;
     }
 
+    if (target.closest(`.${styles.launcherPanel}`)) {
+      return;
+    }
+
     if (activePointerIdRef.current !== null) {
       return;
     }
 
     activePointerIdRef.current = pointerId;
-    pressSessionIdRef.current = target.closest<HTMLElement>(`[data-session-id]`)?.dataset.sessionId || null;
+    pressTargetRef.current =
+      target.closest<HTMLElement>(`[data-session-id]`)?.dataset.sessionId ||
+      (target.closest<HTMLElement>("[data-launcher-trigger='true']") ? "__launcher__" : null);
     holdStartedRef.current = false;
     clearHoldTimer(holdTimerRef);
     holdTimerRef.current = window.setTimeout(() => {
@@ -237,18 +246,24 @@ export function RadioShell() {
     activePointerIdRef.current = null;
 
     if (!holdStartedRef.current) {
-      const tappedSessionId = pressSessionIdRef.current;
-      pressSessionIdRef.current = null;
+      const pressedTarget = pressTargetRef.current;
+      pressTargetRef.current = null;
 
-      if (tappedSessionId && sessionIdsRef.current.includes(tappedSessionId)) {
-        setCurrentSessionId(tappedSessionId);
+      if (pressedTarget === "__launcher__") {
+        setIsLauncherOpen(true);
+        setStatus("idle");
+        return;
+      }
+
+      if (pressedTarget && sessionIdsRef.current.includes(pressedTarget)) {
+        setCurrentSessionId(pressedTarget);
         setStatus("idle");
       }
 
       return;
     }
 
-    pressSessionIdRef.current = null;
+    pressTargetRef.current = null;
 
     if (recorderRef.current?.state === "recording") {
       recorderRef.current.stop();
@@ -281,15 +296,52 @@ export function RadioShell() {
         throw new Error(payload?.error || `Voice request failed with ${response.status}.`);
       }
 
-      if (payload?.sessionId) {
-        setSessionIds((currentIds) => mergeSessionIds([payload.sessionId || "", ...currentIds]));
-        setCurrentSessionId(payload.sessionId);
-      }
-
+      applyVoicePayload(payload);
       setStatus("executed");
     } catch {
       setStatus("error");
     }
+  }
+
+  async function handleLauncherOpen(target: (typeof LAUNCHER_TARGETS)[number]) {
+    setIsLauncherOpen(false);
+    setStatus("processing");
+
+    if (!voiceApiBase) {
+      setStatus("error");
+      return;
+    }
+
+    try {
+      const response = await fetch(`${voiceApiBase}/voice`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          transcript: `open ${target}`
+        })
+      });
+
+      const payload = await parseVoiceResponse(response);
+      if (!response.ok) {
+        throw new Error(payload?.error || `Open request failed with ${response.status}.`);
+      }
+
+      applyVoicePayload(payload);
+      setStatus("executed");
+    } catch {
+      setStatus("error");
+    }
+  }
+
+  function applyVoicePayload(payload: VoiceResponse | null) {
+    if (!payload?.sessionId) {
+      return;
+    }
+
+    setSessionIds((currentIds) => mergeSessionIds([payload.sessionId || "", ...currentIds]));
+    setCurrentSessionId(payload.sessionId);
   }
 
   return (
@@ -297,6 +349,10 @@ export function RadioShell() {
       className={`${styles.page} ${isListening ? styles.listening : ""}`}
       onPointerDown={(event) => {
         if (event.button !== 0 && event.pointerType === "mouse") {
+          return;
+        }
+
+        if ((event.target as HTMLElement).closest(`.${styles.launcherShell}`)) {
           return;
         }
 
@@ -333,12 +389,41 @@ export function RadioShell() {
               {formatSessionLabel(slot.id)}
             </div>
           ) : (
-            <div key={slot.id} className={`${styles.sessionButton} ${styles.placeholder}`} aria-hidden="true">
+            <div
+              key={slot.id}
+              data-launcher-trigger="true"
+              className={`${styles.sessionButton} ${styles.placeholder}`}
+              aria-label="Open a new session"
+            >
               <span className={styles.plus}>+</span>
             </div>
           )
         )}
       </div>
+
+      {isLauncherOpen ? (
+        <div className={styles.launcherShell}>
+          <div className={styles.launcherBackdrop} onClick={() => setIsLauncherOpen(false)} aria-hidden="true" />
+          <section className={styles.launcherPanel}>
+            <p className={styles.launcherTitle}>Open</p>
+            <div className={styles.launcherGrid}>
+              {LAUNCHER_TARGETS.map((target) => (
+                <button
+                  key={target}
+                  type="button"
+                  className={styles.launcherButton}
+                  onClick={() => void handleLauncherOpen(target)}
+                >
+                  {formatSessionLabel(target)}
+                </button>
+              ))}
+            </div>
+            <button type="button" className={styles.launcherDismiss} onClick={() => setIsLauncherOpen(false)}>
+              Cancel
+            </button>
+          </section>
+        </div>
+      ) : null}
 
       <div className={styles.micIconContainer}>
         <svg
@@ -501,18 +586,44 @@ function mergeSessionIds(sessionIds: string[]) {
 }
 
 function buildSessionSlots(sessionIds: string[]) {
-  const knownSessionIds = new Set(sessionIds);
-  const defaultSlots = DEFAULT_SESSION_IDS.map((sessionId) =>
-    knownSessionIds.has(sessionId)
-      ? ({ kind: "session", id: sessionId } as const)
-      : ({ kind: "placeholder", id: `${sessionId}-placeholder` } as const)
-  );
+  const orderedSessions = sortSessionIds(sessionIds).slice(0, 4);
+  const slots: Array<
+    | {
+        kind: "session";
+        id: string;
+      }
+    | {
+        kind: "placeholder";
+        id: string;
+      }
+  > = orderedSessions.map((sessionId) => ({ kind: "session", id: sessionId }));
 
-  const extraSessionSlots = sessionIds
-    .filter((sessionId) => !DEFAULT_SESSION_IDS.includes(sessionId))
-    .map((sessionId) => ({ kind: "session", id: sessionId } as const));
+  if (slots.length < 4) {
+    slots.push({ kind: "placeholder", id: "launcher-placeholder" });
+  }
 
-  return [...defaultSlots, ...extraSessionSlots].slice(0, 4);
+  return slots;
+}
+
+function sortSessionIds(sessionIds: string[]) {
+  return [...sessionIds].sort((left, right) => {
+    const leftIndex = DEFAULT_SESSION_IDS.indexOf(left);
+    const rightIndex = DEFAULT_SESSION_IDS.indexOf(right);
+
+    if (leftIndex >= 0 && rightIndex >= 0) {
+      return leftIndex - rightIndex;
+    }
+
+    if (leftIndex >= 0) {
+      return -1;
+    }
+
+    if (rightIndex >= 0) {
+      return 1;
+    }
+
+    return left.localeCompare(right);
+  });
 }
 
 function formatSessionLabel(sessionId: string) {

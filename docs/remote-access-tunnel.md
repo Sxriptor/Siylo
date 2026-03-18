@@ -59,10 +59,11 @@ cloudflared tunnel run siylo-radio
 Recommended Access gate:
 
 - Require an identity provider or one-time email code.
-- Keep Siylo's own username/password enabled as a second layer.
+- Let Cloudflare Access be the public auth layer.
 
 Notes:
 
 - The local origin is loopback-only by design.
 - `cloudflared` should be the only process reaching it from outside the browser.
+- The loopback proxy does not require separate Basic Auth anymore; rely on Cloudflare Access for the public hostname.
 - `trycloudflare.com` is fine for temporary testing, but the supported path here is a named tunnel.

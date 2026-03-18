@@ -70,6 +70,69 @@
   font-weight: 300;
 }
 
+.launcherShell {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+}
+
+.launcherBackdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.68);
+}
+
+.launcherPanel {
+  position: absolute;
+  left: 50%;
+  bottom: 96px;
+  transform: translateX(-50%);
+  width: min(90vw, 400px);
+  display: grid;
+  gap: 14px;
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  background: rgba(14, 14, 14, 0.96);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+}
+
+.launcherTitle {
+  margin: 0;
+  color: rgba(255, 255, 255, 0.78);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.9rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.launcherGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.launcherButton,
+.launcherDismiss {
+  border: 0;
+  border-radius: 14px;
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-weight: 700;
+}
+
+.launcherButton {
+  min-height: 64px;
+  background: white;
+  color: black;
+}
+
+.launcherDismiss {
+  min-height: 48px;
+  background: rgba(255, 255, 255, 0.08);
+  color: white;
+}
+
 .micIconContainer {
   position: absolute;
   bottom: 30px;
