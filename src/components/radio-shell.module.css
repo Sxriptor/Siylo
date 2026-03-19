@@ -1,107 +1,111 @@
 .page {
   position: fixed;
   inset: 0;
-  background-color: black;
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
+  background:
+    radial-gradient(circle at top, rgba(42, 67, 101, 0.32), transparent 45%),
+    linear-gradient(180deg, #05070d 0%, #0b1220 100%);
+  color: #f4f7fb;
   touch-action: none;
   user-select: none;
   -webkit-user-select: none;
-  transition: background-color 0.2s ease;
+  overflow: hidden;
 }
 
-.page.listening {
-  background-color: #111;
+.listening {
+  background:
+    radial-gradient(circle at top, rgba(225, 76, 76, 0.34), transparent 45%),
+    linear-gradient(180deg, #120608 0%, #180d13 100%);
 }
 
 .sessionContainer {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
-  width: 90%;
-  max-width: 400px;
-  z-index: 10;
-  margin-bottom: 40px; /* Space for the microphone icon */
+  width: min(88vw, 420px);
+  z-index: 1;
 }
 
 .sessionButton {
-  background-color: white;
-  color: black;
-  border: 2px solid transparent;
-  border-radius: 12px;
-  padding: 16px;
-  font-size: 1.2rem;
-  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
-  font-weight: bold;
-  cursor: pointer;
-  transition: background-color 0.2s ease, color 0.2s ease, transform 0.1s ease;
-  text-align: center;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-  aspect-ratio: 3 / 4;
   display: flex;
   align-items: center;
   justify-content: center;
-  word-break: break-word;
+  min-height: 136px;
+  padding: 18px;
+  border-radius: 18px;
+  border: 2px solid transparent;
+  background: #ffffff;
+  color: #08101b;
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
 }
 
-.sessionButton.placeholder {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.2);
+.sessionLabel {
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.active {
+  border-color: #08101b;
+  background: #ffffff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.12), 0 18px 40px rgba(0, 0, 0, 0.3);
+}
+
+.placeholder {
+  background: #ffffff;
   border-style: dashed;
-  color: rgba(255, 255, 255, 0.5);
-  box-shadow: none;
-}
-
-.sessionButton:active {
-  transform: scale(0.96);
-}
-
-.sessionButton.active {
-  background-color: #007bff;
-  border-color: #007bff;
-  color: white;
+  border-color: rgba(8, 16, 27, 0.28);
+  color: rgba(8, 16, 27, 0.55);
 }
 
 .plus {
-  font-size: 2.4rem;
+  font-size: 2.5rem;
   line-height: 1;
-  font-weight: 300;
 }
 
-.launcherShell {
+.launcherShell,
+.inspectorShell {
   position: absolute;
   inset: 0;
-  z-index: 20;
+  z-index: 10;
 }
 
-.launcherBackdrop {
+.launcherBackdrop,
+.inspectorBackdrop {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.68);
+  background: rgba(2, 5, 10, 0.72);
+}
+
+.launcherPanel,
+.inspectorPanel {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(92vw, 460px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 22px;
+  background: rgba(8, 12, 20, 0.96);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
 }
 
 .launcherPanel {
-  position: absolute;
-  left: 50%;
-  bottom: 96px;
-  transform: translateX(-50%);
-  width: min(90vw, 400px);
+  bottom: 88px;
   display: grid;
   gap: 14px;
   padding: 18px;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 20px;
-  background: rgba(14, 14, 14, 0.96);
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
 }
 
-.launcherTitle {
+.launcherTitle,
+.inspectorEyebrow {
   margin: 0;
-  color: rgba(255, 255, 255, 0.78);
+  color: rgba(244, 247, 251, 0.68);
   font-family: "Trebuchet MS", "Avenir Next", sans-serif;
-  font-size: 0.9rem;
+  font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.18em;
   text-transform: uppercase;
@@ -109,50 +113,160 @@
 
 .launcherGrid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
 .launcherButton,
-.launcherDismiss {
+.launcherDismiss,
+.iconButton,
+.closeButton,
+.keyboardButton {
   border: 0;
   border-radius: 14px;
   font-family: "Trebuchet MS", "Avenir Next", sans-serif;
   font-weight: 700;
 }
 
-.launcherButton {
-  min-height: 64px;
-  background: white;
-  color: black;
+.launcherButton,
+.keyboardButton {
+  min-height: 48px;
+  background: #f4f7fb;
+  color: #08101b;
 }
 
-.launcherDismiss {
+.launcherDismiss,
+.iconButton,
+.closeButton,
+.keyboardButtonMuted {
+  background: rgba(255, 255, 255, 0.1);
+  color: #f4f7fb;
+}
+
+.inspectorPanel {
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: grid;
+  gap: 16px;
+  padding: 20px;
+}
+
+.inspectorHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.inspectorTitle {
+  margin: 6px 0 0;
+  font-size: 1.4rem;
+  line-height: 1.1;
+}
+
+.inspectorControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inspectorStatus {
+  color: rgba(244, 247, 251, 0.7);
+  font-size: 0.88rem;
+}
+
+.iconButton,
+.closeButton {
+  min-height: 40px;
+  padding: 0 14px;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  padding: 0;
+}
+
+.outputPanel {
+  min-height: 220px;
+  max-height: 42vh;
+  margin: 0;
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.34);
+  color: #dbe6f6;
+  font-size: 0.92rem;
+  line-height: 1.45;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inspectorMessage {
+  margin: 0;
+  color: #ff8e8e;
+  font-size: 0.9rem;
+}
+
+.keyboardDock {
+  display: grid;
+  gap: 12px;
+}
+
+.keyboardInput {
+  width: 100%;
   min-height: 48px;
-  background: rgba(255, 255, 255, 0.08);
-  color: white;
+  padding: 0 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #f4f7fb;
+}
+
+.keyboardActions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .micIconContainer {
   position: absolute;
-  bottom: 30px;
+  bottom: 28px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 5;
-  opacity: 0.5;
-  transition: opacity 0.2s ease, color 0.2s ease;
-  color: white;
-}
-
-.listening .micIconContainer {
-  opacity: 1;
-  color: #ff3b30;
+  width: 68px;
+  height: 68px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(244, 247, 251, 0.76);
+  z-index: 1;
 }
 
 .micIcon {
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
+}
+
+@media (max-width: 640px) {
+  .sessionContainer {
+    width: min(92vw, 360px);
+  }
+
+  .sessionButton {
+    min-height: 112px;
+  }
+
+  .inspectorPanel,
+  .launcherPanel {
+    width: min(94vw, 420px);
+  }
+
+  .keyboardActions {
+    grid-template-columns: 1fr;
+  }
 }

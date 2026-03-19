@@ -201,6 +201,21 @@ function hasManagedSession(sessionId) {
   return runtimeSessions.has(sessionId);
 }
 
+function getManagedSessionSnapshot(sessionId, maxLength = 6000) {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return null;
+  }
+
+  const output = compactTerminalOutput(runtime.recentOutput || runtime.pendingOutput || "").slice(-maxLength).trim();
+
+  return {
+    sessionId,
+    isBusy: runtime.isBusy,
+    output
+  };
+}
+
 function drainPendingOutput(sessionId, maxLength = 1600) {
   const runtime = runtimeSessions.get(sessionId);
   if (!runtime || !runtime.pendingOutput) {
@@ -452,6 +467,7 @@ module.exports = {
   killSession,
   listManagedSessions,
   hasManagedSession,
+  getManagedSessionSnapshot,
   sendKeyToSession,
   sendCommandToSession,
   sendTextToSession

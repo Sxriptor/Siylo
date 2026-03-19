@@ -1,7 +1,8 @@
-const { loadConfig, saveConfig } = require("./config-store");
+const { loadConfig, saveConfig, encryptSecret } = require("./config-store");
 const { hashSecret } = require("./security-utils");
 
 const config = loadConfig();
+const defaultTranscriptionModel = process.env.SIYLO_TRANSCRIBE_MODEL || "whisper-1";
 
 const state = {
   isConnected: false,
@@ -14,7 +15,7 @@ const state = {
     status: "stopped",
     port: config.voiceServerPort,
     url: "",
-    provider: "unconfigured",
+    provider: resolveVoiceProvider(config),
     lastError: ""
   },
   remoteAccess: {
@@ -118,18 +119,41 @@ function setRemoteAccessState(partialState) {
 function updateConfig(partialConfig) {
   const nextConfig = {
     ...state.config,
-    ...partialConfig,
+    botToken:
+      partialConfig.botToken === undefined
+        ? state.config.botToken
+        : String(partialConfig.botToken || "").trim(),
     authorizedUsers: Array.isArray(partialConfig.authorizedUsers)
-      ? partialConfig.authorizedUsers.filter(Boolean)
+      ? partialConfig.authorizedUsers.map((value) => String(value || "").trim()).filter(Boolean)
       : state.config.authorizedUsers,
+    dashboardPort:
+      partialConfig.dashboardPort === undefined
+        ? state.config.dashboardPort
+        : Number(partialConfig.dashboardPort) || state.config.dashboardPort,
     voiceServerPort:
       partialConfig.voiceServerPort === undefined
         ? state.config.voiceServerPort
         : Number(partialConfig.voiceServerPort) || state.config.voiceServerPort,
+    remoteAccessEnabled:
+      partialConfig.remoteAccessEnabled === undefined
+        ? state.config.remoteAccessEnabled
+        : Boolean(partialConfig.remoteAccessEnabled),
     remoteAccessPort:
       partialConfig.remoteAccessPort === undefined
         ? state.config.remoteAccessPort
-        : Number(partialConfig.remoteAccessPort) || state.config.remoteAccessPort
+        : Number(partialConfig.remoteAccessPort) || state.config.remoteAccessPort,
+    remoteAccessUsername:
+      partialConfig.remoteAccessUsername === undefined
+        ? state.config.remoteAccessUsername
+        : String(partialConfig.remoteAccessUsername || "").trim(),
+    autoConnect:
+      partialConfig.autoConnect === undefined
+        ? state.config.autoConnect
+        : Boolean(partialConfig.autoConnect),
+    commandPrefix:
+      partialConfig.commandPrefix === undefined
+        ? state.config.commandPrefix
+        : String(partialConfig.commandPrefix || "").trim() || state.config.commandPrefix
   };
 
   if (partialConfig.remoteAccessPassword !== undefined) {
@@ -142,13 +166,22 @@ function updateConfig(partialConfig) {
     }
   }
 
+  if (partialConfig.openAIApiKey !== undefined) {
+    nextConfig.openAIApiKeyEncrypted = encryptSecret(partialConfig.openAIApiKey);
+  }
+
+  if (partialConfig.clearOpenAIApiKey) {
+    nextConfig.openAIApiKeyEncrypted = "";
+  }
+
   state.config = saveConfig({
     ...nextConfig
   });
 
   state.voice = {
     ...state.voice,
-    port: state.config.voiceServerPort
+    port: state.config.voiceServerPort,
+    provider: resolveVoiceProvider(state.config)
   };
   state.remoteAccess = {
     ...state.remoteAccess,
@@ -170,6 +203,7 @@ function getConfig() {
 function sanitizeConfig(configValue) {
   return {
     botToken: configValue.botToken,
+    openAIApiKeyConfigured: Boolean(configValue.openAIApiKeyEncrypted || configValue.openAIApiKey),
     authorizedUsers: configValue.authorizedUsers,
     dashboardPort: configValue.dashboardPort,
     voiceServerPort: configValue.voiceServerPort,
@@ -180,6 +214,14 @@ function sanitizeConfig(configValue) {
     autoConnect: configValue.autoConnect,
     commandPrefix: configValue.commandPrefix
   };
+}
+
+function resolveVoiceProvider(configValue) {
+  if (process.env.OPENAI_API_KEY || configValue.openAIApiKeyEncrypted || configValue.openAIApiKey) {
+    return `openai:${defaultTranscriptionModel}`;
+  }
+
+  return "unconfigured";
 }
 
 function initializeUpdateState(currentVersion) {

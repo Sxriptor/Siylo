@@ -1,4 +1,18 @@
+const { decryptSecret } = require("./config-store");
+const { getConfig } = require("./state");
+
 const defaultModel = process.env.SIYLO_TRANSCRIBE_MODEL || "whisper-1";
+
+function getOpenAiApiKey() {
+  const environmentKey = String(process.env.OPENAI_API_KEY || "").trim();
+
+  if (environmentKey) {
+    return environmentKey;
+  }
+
+  const config = getConfig();
+  return decryptSecret(config.openAIApiKeyEncrypted || config.openAIApiKey);
+}
 
 async function transcribeAudio({ audioBuffer, contentType, filename, prompt, transcript }) {
   const providedTranscript = String(transcript || "").trim();
@@ -10,9 +24,11 @@ async function transcribeAudio({ audioBuffer, contentType, filename, prompt, tra
     throw new Error("Audio payload is empty.");
   }
 
-  const openAiApiKey = process.env.OPENAI_API_KEY;
+  const openAiApiKey = getOpenAiApiKey();
   if (!openAiApiKey) {
-    throw new Error("No transcription provider configured. Set OPENAI_API_KEY or provide a transcript field.");
+    throw new Error(
+      "No transcription provider configured. Add an OpenAI API key in the dashboard, set OPENAI_API_KEY, or provide a transcript field."
+    );
   }
 
   const formData = new FormData();
@@ -49,7 +65,7 @@ async function transcribeAudio({ audioBuffer, contentType, filename, prompt, tra
 }
 
 function getTranscriptionProviderName() {
-  if (process.env.OPENAI_API_KEY) {
+  if (getOpenAiApiKey()) {
     return `openai:${defaultModel}`;
   }
 

@@ -1,5 +1,6 @@
 export type SiyloConfig = {
   botToken: string;
+  openAIApiKeyConfigured: boolean;
   authorizedUsers: string[];
   dashboardPort: number;
   voiceServerPort: number;
@@ -12,6 +13,8 @@ export type SiyloConfig = {
 };
 
 export type SiyloConfigUpdate = Partial<SiyloConfig> & {
+  openAIApiKey?: string;
+  clearOpenAIApiKey?: boolean;
   remoteAccessPassword?: string;
 };
 

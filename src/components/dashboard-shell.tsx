@@ -44,6 +44,7 @@ const browserFallbackState: SiyloState = {
   },
   config: {
     botToken: "",
+    openAIApiKeyConfigured: false,
     authorizedUsers: ["123456789012345678", "987654321098765432"],
     dashboardPort: 3000,
     voiceServerPort: 3210,
@@ -79,6 +80,7 @@ export function DashboardShell() {
   const [machineName, setMachineName] = useState("Local machine");
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
   const [botTokenInput, setBotTokenInput] = useState("");
+  const [openAiApiKeyInput, setOpenAiApiKeyInput] = useState("");
   const [remoteAccessPortInput, setRemoteAccessPortInput] = useState("3443");
   const [remoteAccessEnabled, setRemoteAccessEnabled] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
@@ -182,6 +184,11 @@ export function DashboardShell() {
         hint: "Used to connect the local agent to the Discord gateway."
       },
       {
+        label: "OpenAI API key (local)",
+        value: state.config.openAIApiKeyConfigured ? "Stored" : "Missing",
+        hint: "Encrypted locally and used by voice transcription when no env var override is set."
+      },
+      {
         label: "Discord runtime",
         value: state.discord.status,
         hint: state.discord.botTag || state.discord.lastError || "No live Discord session yet."
@@ -250,6 +257,7 @@ export function DashboardShell() {
     try {
       const nextState = await window.siylo.updateConfig({
         botToken: botTokenInput.trim(),
+        ...(openAiApiKeyInput.trim() ? { openAIApiKey: openAiApiKeyInput.trim() } : {}),
         authorizedUsers: authorizedUsersInput
           .split(/\r?\n/)
           .map((value) => value.trim())
@@ -259,6 +267,26 @@ export function DashboardShell() {
       });
 
       setState(nextState);
+      setOpenAiApiKeyInput("");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleClearOpenAiApiKey() {
+    if (!window.siylo) {
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      const nextState = await window.siylo.updateConfig({
+        clearOpenAIApiKey: true
+      });
+
+      setState(nextState);
+      setOpenAiApiKeyInput("");
     } finally {
       setIsSaving(false);
     }
@@ -382,7 +410,7 @@ export function DashboardShell() {
 
         <Panel
           title="Credentials and access"
-          description="Store the Discord bot token and allowed user IDs for this machine."
+          description="Store the Discord bot token, OpenAI key, and allowed user IDs for this machine."
         >
           <label className="fieldLabel" htmlFor="bot-token">
             Discord bot token
@@ -396,6 +424,27 @@ export function DashboardShell() {
             placeholder="Paste your Discord bot token"
             onChange={(event) => setBotTokenInput(event.target.value)}
           />
+          <label className="fieldLabel" htmlFor="openai-api-key">
+            OpenAI API key
+          </label>
+          <input
+            id="openai-api-key"
+            className="textInput"
+            type="password"
+            value={openAiApiKeyInput}
+            disabled={!isDesktop}
+            autoComplete="off"
+            placeholder={
+              currentState.config.openAIApiKeyConfigured
+                ? "Stored locally. Enter a new key to replace it"
+                : "Paste your OpenAI API key"
+            }
+            onChange={(event) => setOpenAiApiKeyInput(event.target.value)}
+          />
+          <p className="muted">
+            Stored in the local config file using OS-backed encryption. Leave blank to keep the
+            current key.
+          </p>
           <div className="pillWrap">
             {currentState.config.authorizedUsers.map((userId) => (
               <span key={userId} className="pill">
@@ -421,6 +470,13 @@ export function DashboardShell() {
               disabled={!isDesktop || isSaving}
             >
               {isSaving ? "Saving..." : "Save configuration"}
+            </button>
+            <button
+              className="actionButton secondary"
+              onClick={handleClearOpenAiApiKey}
+              disabled={!isDesktop || isSaving || !currentState.config.openAIApiKeyConfigured}
+            >
+              Clear OpenAI key
             </button>
           </div>
         </Panel>

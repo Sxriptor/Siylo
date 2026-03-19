@@ -9,6 +9,8 @@ const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
 const SESSION_STORAGE_KEY = "siylo-radio-session-id";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
+const DOUBLE_TAP_WINDOW_MS = 360;
+const SESSION_POLL_INTERVAL_MS = 900;
 
 type RadioStatus = "idle" | "listening" | "processing" | "executed" | "error";
 
@@ -19,6 +21,17 @@ type VoiceResponse = {
   transcript?: string;
   status?: string;
   error?: string;
+};
+
+type SessionStreamResponse = {
+  error?: string;
+  inputAvailable?: boolean;
+  isBusy?: boolean;
+  message?: string;
+  output?: string;
+  outputAvailable?: boolean;
+  sessionId?: string;
+  status?: string;
 };
 
 type HealthResponse = {
@@ -40,6 +53,11 @@ export function RadioShell() {
   const [voiceApiBase, setVoiceApiBase] = useState("");
   const [status, setStatus] = useState<RadioStatus>("idle");
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
+  const [inspectorSessionId, setInspectorSessionId] = useState<string | null>(null);
+  const [sessionStream, setSessionStream] = useState<SessionStreamResponse | null>(null);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [terminalInput, setTerminalInput] = useState("");
+  const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -48,12 +66,18 @@ export function RadioShell() {
   const holdTimerRef = useRef<number | null>(null);
   const holdStartedRef = useRef(false);
   const pressTargetRef = useRef<string | null>(null);
+  const lastSessionTapRef = useRef<{
+    sessionId: string;
+    timestamp: number;
+  } | null>(null);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionIdsRef = useRef(sessionIds);
+  const terminalInputRef = useRef<HTMLInputElement | null>(null);
 
   const isBusy = status === "processing";
   const isListening = status === "listening";
   const sessionSlots = useMemo(() => buildSessionSlots(sessionIds), [sessionIds]);
+  const inspectorStatusLabel = getInspectorStatusLabel(sessionStream);
 
   useEffect(() => {
     const storedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
@@ -87,6 +111,12 @@ export function RadioShell() {
       setCurrentSessionId(fallbackSessionId);
     }
   }, [currentSessionId, sessionIds]);
+
+  useEffect(() => {
+    if (sessionIds.length > 0 && inspectorSessionId && !sessionIds.includes(inspectorSessionId)) {
+      closeInspector();
+    }
+  }, [inspectorSessionId, sessionIds]);
 
   useEffect(() => {
     if (!("serviceWorker" in navigator)) {
@@ -133,6 +163,75 @@ export function RadioShell() {
   }, []);
 
   useEffect(() => {
+    if (!inspectorSessionId || !voiceApiBase) {
+      return;
+    }
+
+    const sessionId = inspectorSessionId as string;
+    let cancelled = false;
+
+    async function refreshSessionStream() {
+      try {
+        const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/output`, {
+          cache: "no-store"
+        });
+        const payload = await parseJsonResponse<SessionStreamResponse>(response);
+        if (cancelled) {
+          return;
+        }
+
+        setSessionStream(payload || null);
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        setSessionStream({
+          error: "Unable to load live stdout.",
+          output: "",
+          outputAvailable: false,
+          sessionId,
+          status: "error"
+        });
+      }
+    }
+
+    void refreshSessionStream();
+    const intervalId = window.setInterval(() => {
+      void refreshSessionStream();
+    }, SESSION_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [inspectorSessionId, voiceApiBase]);
+
+  useEffect(() => {
+    if (!inspectorSessionId) {
+      return;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeInspector();
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [inspectorSessionId]);
+
+  useEffect(() => {
+    if (isKeyboardOpen) {
+      terminalInputRef.current?.focus();
+    }
+  }, [isKeyboardOpen]);
+
+  useEffect(() => {
     return () => {
       clearHoldTimer(holdTimerRef);
 
@@ -147,7 +246,7 @@ export function RadioShell() {
   }, []);
 
   async function handleHoldStart(pointerId: number) {
-    if (isBusy || isListening) {
+    if (isBusy || isListening || inspectorSessionId) {
       return;
     }
 
@@ -163,6 +262,7 @@ export function RadioShell() {
 
     activePointerIdRef.current = pointerId;
     setIsLauncherOpen(false);
+    lastSessionTapRef.current = null;
 
     try {
       const stream = await getOrCreateStream(streamRef);
@@ -210,11 +310,11 @@ export function RadioShell() {
   }
 
   function handlePressStart(pointerId: number, target: HTMLElement) {
-    if (isBusy || isListening) {
+    if (isBusy || isListening || inspectorSessionId) {
       return;
     }
 
-    if (target.closest(`.${styles.launcherPanel}`)) {
+    if (target.closest(`.${styles.launcherPanel}`) || target.closest(`.${styles.inspectorPanel}`)) {
       return;
     }
 
@@ -250,20 +350,38 @@ export function RadioShell() {
       pressTargetRef.current = null;
 
       if (pressedTarget === "__launcher__") {
+        lastSessionTapRef.current = null;
         setIsLauncherOpen(true);
         setStatus("idle");
         return;
       }
 
       if (pressedTarget && sessionIdsRef.current.includes(pressedTarget)) {
+        const now = Date.now();
+        const didDoubleTap =
+          lastSessionTapRef.current?.sessionId === pressedTarget &&
+          now - lastSessionTapRef.current.timestamp <= DOUBLE_TAP_WINDOW_MS;
+
         setCurrentSessionId(pressedTarget);
         setStatus("idle");
+
+        if (didDoubleTap) {
+          lastSessionTapRef.current = null;
+          openInspector(pressedTarget);
+          return;
+        }
+
+        lastSessionTapRef.current = {
+          sessionId: pressedTarget,
+          timestamp: now
+        };
       }
 
       return;
     }
 
     pressTargetRef.current = null;
+    lastSessionTapRef.current = null;
 
     if (recorderRef.current?.state === "recording") {
       recorderRef.current.stop();
@@ -275,6 +393,23 @@ export function RadioShell() {
       holdStartedRef.current = false;
       setStatus("idle");
     }
+  }
+
+  function openInspector(sessionId: string) {
+    setCurrentSessionId(sessionId);
+    setInspectorSessionId(sessionId);
+    setSessionStream(null);
+    setIsKeyboardOpen(false);
+    setTerminalInput("");
+    setIsLauncherOpen(false);
+  }
+
+  function closeInspector() {
+    setInspectorSessionId(null);
+    setSessionStream(null);
+    setIsKeyboardOpen(false);
+    setTerminalInput("");
+    setIsSendingTerminalInput(false);
   }
 
   async function uploadRecording(audioBlob: Blob, sessionId: string) {
@@ -335,6 +470,79 @@ export function RadioShell() {
     }
   }
 
+  async function handleTerminalSubmit() {
+    if (!inspectorSessionId || !voiceApiBase || !terminalInput.trim()) {
+      return;
+    }
+
+    const sessionId = inspectorSessionId as string;
+    setIsSendingTerminalInput(true);
+
+    try {
+      const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          text: terminalInput.trim()
+        })
+      });
+      const payload = await parseJsonResponse<SessionStreamResponse>(response);
+
+      if (!response.ok || payload?.status === "error") {
+        throw new Error(payload?.error || `Terminal input failed with ${response.status}.`);
+      }
+
+      setSessionStream(payload || null);
+      setTerminalInput("");
+    } catch {
+      setSessionStream((currentValue) => ({
+        ...(currentValue || {}),
+        error: "Unable to send terminal input.",
+        status: "error"
+      }));
+    } finally {
+      setIsSendingTerminalInput(false);
+    }
+  }
+
+  async function handleTerminalKeyInput(keyName: string) {
+    if (!inspectorSessionId || !voiceApiBase) {
+      return;
+    }
+
+    const sessionId = inspectorSessionId as string;
+    setIsSendingTerminalInput(true);
+
+    try {
+      const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          key: keyName
+        })
+      });
+      const payload = await parseJsonResponse<SessionStreamResponse>(response);
+
+      if (!response.ok || payload?.status === "error") {
+        throw new Error(payload?.error || `Terminal key send failed with ${response.status}.`);
+      }
+
+      setSessionStream(payload || null);
+    } catch {
+      setSessionStream((currentValue) => ({
+        ...(currentValue || {}),
+        error: "Unable to send terminal key input.",
+        status: "error"
+      }));
+    } finally {
+      setIsSendingTerminalInput(false);
+    }
+  }
+
   function applyVoicePayload(payload: VoiceResponse | null) {
     if (!payload?.sessionId) {
       return;
@@ -352,7 +560,10 @@ export function RadioShell() {
           return;
         }
 
-        if ((event.target as HTMLElement).closest(`.${styles.launcherShell}`)) {
+        if (
+          (event.target as HTMLElement).closest(`.${styles.launcherShell}`) ||
+          (event.target as HTMLElement).closest(`.${styles.inspectorShell}`)
+        ) {
           return;
         }
 
@@ -386,7 +597,7 @@ export function RadioShell() {
               data-session-id={slot.id}
               className={`${styles.sessionButton} ${currentSessionId === slot.id ? styles.active : ""}`}
             >
-              {formatSessionLabel(slot.id)}
+              <span className={styles.sessionLabel}>{formatSessionLabel(slot.id)}</span>
             </div>
           ) : (
             <div
@@ -421,6 +632,105 @@ export function RadioShell() {
             <button type="button" className={styles.launcherDismiss} onClick={() => setIsLauncherOpen(false)}>
               Cancel
             </button>
+          </section>
+        </div>
+      ) : null}
+
+      {inspectorSessionId ? (
+        <div className={styles.inspectorShell}>
+          <div className={styles.inspectorBackdrop} onClick={closeInspector} aria-hidden="true" />
+          <section className={styles.inspectorPanel}>
+            <header className={styles.inspectorHeader}>
+              <div>
+                <p className={styles.inspectorEyebrow}>Live Stdout</p>
+                <h2 className={styles.inspectorTitle}>{formatSessionLabel(inspectorSessionId)}</h2>
+              </div>
+              <div className={styles.inspectorControls}>
+                <span className={styles.inspectorStatus}>{inspectorStatusLabel}</span>
+                <button
+                  type="button"
+                  className={styles.iconButton}
+                  onClick={() => setIsKeyboardOpen((currentValue) => !currentValue)}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
+                    <rect x="2.75" y="6.25" width="18.5" height="11.5" rx="2.25" />
+                    <path d="M6.5 10.25h.01" />
+                    <path d="M9.5 10.25h.01" />
+                    <path d="M12.5 10.25h.01" />
+                    <path d="M15.5 10.25h.01" />
+                    <path d="M6.5 13.25h.01" />
+                    <path d="M9.5 13.25h.01" />
+                    <path d="M12.5 13.25h.01" />
+                    <path d="M15.5 13.25h.01" />
+                    <path d="M7 16.25h10" />
+                  </svg>
+                </button>
+                <button type="button" className={styles.closeButton} onClick={closeInspector}>
+                  Close
+                </button>
+              </div>
+            </header>
+
+            <pre className={styles.outputPanel}>
+              {sessionStream?.outputAvailable === false
+                ? sessionStream.message || sessionStream.error || "Live stdout is not available for this session."
+                : sessionStream?.output || "Waiting for terminal output..."}
+            </pre>
+
+            {sessionStream?.error ? <p className={styles.inspectorMessage}>{sessionStream.error}</p> : null}
+
+            {isKeyboardOpen ? (
+              <form
+                className={styles.keyboardDock}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void handleTerminalSubmit();
+                }}
+              >
+                <input
+                  ref={terminalInputRef}
+                  className={styles.keyboardInput}
+                  type="text"
+                  value={terminalInput}
+                  disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
+                  onChange={(event) => setTerminalInput(event.target.value)}
+                  placeholder={
+                    sessionStream?.inputAvailable === false
+                      ? "Keyboard input is not available for this session"
+                      : "Type a command and press Send"
+                  }
+                />
+                <div className={styles.keyboardActions}>
+                  <button
+                    type="button"
+                    className={styles.keyboardButton}
+                    disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
+                    onClick={() => void handleTerminalKeyInput("enter")}
+                  >
+                    Enter
+                  </button>
+                  <button
+                    type="button"
+                    className={`${styles.keyboardButton} ${styles.keyboardButtonMuted}`}
+                    disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
+                    onClick={() => void handleTerminalKeyInput("ctrl+c")}
+                  >
+                    Ctrl+C
+                  </button>
+                  <button
+                    type="submit"
+                    className={styles.keyboardButton}
+                    disabled={
+                      isSendingTerminalInput ||
+                      sessionStream?.inputAvailable === false ||
+                      !terminalInput.trim()
+                    }
+                  >
+                    {isSendingTerminalInput ? "Sending..." : "Send"}
+                  </button>
+                </div>
+              </form>
+            ) : null}
           </section>
         </div>
       ) : null}
@@ -492,6 +802,15 @@ async function parseVoiceResponse(response: Response) {
 
   const text = await response.text();
   return text ? ({ status: text } satisfies VoiceResponse) : null;
+}
+
+async function parseJsonResponse<T>(response: Response) {
+  const contentType = response.headers.get("content-type") || "";
+  if (!contentType.includes("application/json")) {
+    return null;
+  }
+
+  return (await response.json()) as T;
 }
 
 function getFileExtension(mimeType: string) {
@@ -652,4 +971,20 @@ function formatSessionLabel(sessionId: string) {
   }
 
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function getInspectorStatusLabel(stream: SessionStreamResponse | null) {
+  if (!stream) {
+    return "Connecting";
+  }
+
+  if (stream.outputAvailable === false) {
+    return "No stream";
+  }
+
+  if (stream.isBusy) {
+    return "Running";
+  }
+
+  return "Ready";
 }

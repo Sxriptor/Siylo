@@ -1,6 +1,12 @@
 const http = require("node:http");
-const { appendLog, getStateSnapshot, setVoiceState } = require("./state");
+const { appendLog, getSession, getStateSnapshot, setVoiceState } = require("./state");
 const { executeVoiceCommand } = require("./execution-engine");
+const {
+  getManagedSessionSnapshot,
+  hasManagedSession,
+  sendKeyToSession,
+  sendTextToSession
+} = require("./session-manager");
 const {
   getTranscriptionProviderName,
   transcribeAudio
@@ -144,6 +150,32 @@ async function handleRequest(request, response) {
     return;
   }
 
+  const sessionRouteMatch = requestUrl.pathname.match(/^\/sessions\/([^/]+)\/(output|input)$/i);
+  if (sessionRouteMatch) {
+    const sessionId = decodeURIComponent(sessionRouteMatch[1] || "").trim().toLowerCase();
+    const routeType = (sessionRouteMatch[2] || "").toLowerCase();
+
+    if (!sessionId) {
+      sendJson(response, 400, {
+        error: "Session ID is required.",
+        status: "error"
+      });
+      return;
+    }
+
+    if (routeType === "output" && request.method === "GET") {
+      sendJson(response, 200, resolveSessionOutputPayload(sessionId));
+      return;
+    }
+
+    if (routeType === "input" && request.method === "POST") {
+      const payload = await parseJsonRequest(request);
+      const result = await handleSessionInputRequest(sessionId, payload);
+      sendJson(response, 200, result);
+      return;
+    }
+  }
+
   sendJson(response, 404, {
     error: "Not found.",
     status: "error"
@@ -250,6 +282,77 @@ function parseMultipartFormData(bodyBuffer, contentType) {
     fields,
     files
   };
+}
+
+async function parseJsonRequest(request) {
+  const bodyBuffer = await readRequestBody(request);
+  const bodyText = bodyBuffer.toString("utf8").trim();
+
+  if (!bodyText) {
+    return {};
+  }
+
+  return JSON.parse(bodyText);
+}
+
+function resolveSessionOutputPayload(sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    return {
+      error: `Session not found: ${sessionId}`,
+      inputAvailable: false,
+      output: "",
+      outputAvailable: false,
+      sessionId,
+      status: "error"
+    };
+  }
+
+  if (!hasManagedSession(sessionId)) {
+    return {
+      inputAvailable: false,
+      isBusy: false,
+      message: "Live stdout is available only for managed terminal sessions.",
+      output: "",
+      outputAvailable: false,
+      sessionId,
+      status: "ok"
+    };
+  }
+
+  const snapshot = getManagedSessionSnapshot(sessionId);
+  return {
+    inputAvailable: true,
+    isBusy: snapshot?.isBusy || false,
+    output: snapshot?.output || "",
+    outputAvailable: true,
+    sessionId,
+    status: "ok"
+  };
+}
+
+async function handleSessionInputRequest(sessionId, payload) {
+  const session = getSession(sessionId);
+  if (!session) {
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
+  if (!hasManagedSession(sessionId)) {
+    throw new Error("Keyboard input is available only for managed terminal sessions.");
+  }
+
+  const text = String(payload?.text || "").trim();
+  const key = String(payload?.key || "").trim();
+
+  if (text) {
+    await sendTextToSession(sessionId, text);
+  } else if (key) {
+    await sendKeyToSession(sessionId, key);
+  } else {
+    throw new Error("Input payload must include `text` or `key`.");
+  }
+
+  return resolveSessionOutputPayload(sessionId);
 }
 
 function readRequestBody(request, maxBytes = 32 * 1024 * 1024) {
