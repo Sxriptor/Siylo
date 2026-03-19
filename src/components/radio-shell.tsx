@@ -53,6 +53,7 @@ export function RadioShell() {
   const [currentSessionId, setCurrentSessionId] = useState(DEFAULT_SESSION_IDS[0]);
   const [voiceApiBase, setVoiceApiBase] = useState("");
   const [status, setStatus] = useState<RadioStatus>("idle");
+  const [isPressingToRecord, setIsPressingToRecord] = useState(false);
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
   const [inspectorSessionId, setInspectorSessionId] = useState<string | null>(null);
   const [sessionStream, setSessionStream] = useState<SessionStreamResponse | null>(null);
@@ -263,11 +264,6 @@ export function RadioShell() {
       return;
     }
 
-    if (!voiceApiBase) {
-      setStatus("error");
-      return;
-    }
-
     if (!("MediaRecorder" in window) || !navigator.mediaDevices?.getUserMedia) {
       setStatus("error");
       return;
@@ -317,6 +313,7 @@ export function RadioShell() {
       setStatus("listening");
     } catch {
       holdStartedRef.current = false;
+      setIsPressingToRecord(false);
       setStatus("error");
       activePointerIdRef.current = null;
     }
@@ -336,6 +333,7 @@ export function RadioShell() {
     }
 
     activePointerIdRef.current = pointerId;
+    setIsPressingToRecord(true);
     pressTargetRef.current =
       target.closest<HTMLElement>(`[data-session-id]`)?.dataset.sessionId ||
       (target.closest<HTMLElement>("[data-launcher-trigger='true']") ? "__launcher__" : null);
@@ -360,6 +358,7 @@ export function RadioShell() {
 
     clearHoldTimer(holdTimerRef);
     activePointerIdRef.current = null;
+    setIsPressingToRecord(false);
 
     if (!holdStartedRef.current) {
       const pressedTarget = pressTargetRef.current;
@@ -432,11 +431,25 @@ export function RadioShell() {
     setStatus("processing");
 
     try {
+      let resolvedVoiceApiBase = voiceApiBase;
+      if (!resolvedVoiceApiBase) {
+        const health = await probeVoiceBackend();
+        resolvedVoiceApiBase = health?.baseUrl || "";
+
+        if (resolvedVoiceApiBase) {
+          setVoiceApiBase(resolvedVoiceApiBase);
+        }
+      }
+
+      if (!resolvedVoiceApiBase) {
+        throw new Error("Voice backend unavailable.");
+      }
+
       const formData = new FormData();
       formData.append("audio", audioBlob, `radio-input.${getFileExtension(audioBlob.type)}`);
       formData.append("sessionId", sessionId);
 
-      const response = await fetch(`${voiceApiBase}/voice`, {
+      const response = await fetch(`${resolvedVoiceApiBase}/voice`, {
         method: "POST",
         body: formData
       });
@@ -756,9 +769,11 @@ export function RadioShell() {
         </div>
       ) : null}
 
-      <div className={`${styles.micIconContainer} ${isListening ? styles.micIconContainerActive : ""}`}>
+      <div
+        className={`${styles.micIconContainer} ${isListening || isPressingToRecord ? styles.micIconContainerActive : ""}`}
+      >
         <svg
-          className={`${styles.micIcon} ${isListening ? styles.micIconActive : ""}`}
+          className={`${styles.micIcon} ${isListening || isPressingToRecord ? styles.micIconActive : ""}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"

@@ -76,6 +76,27 @@ select {
     var(--surface);
 }
 
+.overlayBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(31, 27, 22, 0.38);
+  backdrop-filter: blur(6px);
+}
+
+.infoOverlay {
+  width: min(920px, 100%);
+  max-height: min(88vh, 900px);
+  overflow: auto;
+  padding: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 253, 248, 0.98), rgba(244, 241, 234, 0.95)),
+    var(--surface);
+}
+
 .updateCopy h2 {
   margin: 0;
   font-size: 1.2rem;
@@ -178,12 +199,20 @@ select {
 }
 
 .panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
   margin-bottom: 14px;
 }
 
 .panelHeader p {
   margin: 6px 0 0;
   line-height: 1.4;
+}
+
+.panelAction {
+  flex-shrink: 0;
 }
 
 .stackList,
@@ -222,6 +251,25 @@ select {
 .actionButton:disabled {
   cursor: progress;
   opacity: 0.65;
+}
+
+.infoButton,
+.infoCloseButton {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-strong);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.infoButton {
+  width: 34px;
+  height: 34px;
+  font-weight: 700;
+}
+
+.infoCloseButton {
+  padding: 9px 14px;
 }
 
 .fieldLabel {
@@ -329,9 +377,55 @@ select {
   color: var(--muted);
 }
 
+.overlayHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.overlayHeader h2,
+.infoBlock h3,
+.infoChecklist h3 {
+  margin: 0;
+}
+
+.infoGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.infoBlock {
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface-strong);
+}
+
+.infoBlock ul {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.infoChecklist {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.46);
+}
+
 @media (max-width: 920px) {
   .twoCol,
   .logLayout {
+    grid-template-columns: 1fr;
+  }
+
+  .infoGrid {
     grid-template-columns: 1fr;
   }
 

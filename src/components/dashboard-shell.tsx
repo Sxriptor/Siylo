@@ -83,6 +83,7 @@ export function DashboardShell() {
   const [openAiApiKeyInput, setOpenAiApiKeyInput] = useState("");
   const [remoteAccessPortInput, setRemoteAccessPortInput] = useState("3443");
   const [remoteAccessEnabled, setRemoteAccessEnabled] = useState(false);
+  const [showRemoteAccessInfo, setShowRemoteAccessInfo] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isStartingSession, setIsStartingSession] = useState(false);
   const [isCheckingForUpdates, setIsCheckingForUpdates] = useState(false);
@@ -131,6 +132,23 @@ export function DashboardShell() {
   useEffect(() => {
     setRemoteAccessEnabled(state.config.remoteAccessEnabled);
   }, [state.config.remoteAccessEnabled]);
+
+  useEffect(() => {
+    if (!showRemoteAccessInfo) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowRemoteAccessInfo(false);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showRemoteAccessInfo]);
 
   const commandExamples = useMemo(() => {
     const prefix = state?.config.commandPrefix || "@siylo";
@@ -338,6 +356,12 @@ export function DashboardShell() {
 
   return (
     <main className="shell">
+      {showRemoteAccessInfo ? (
+        <RemoteAccessInfoOverlay
+          port={currentState.config.remoteAccessPort}
+          onClose={() => setShowRemoteAccessInfo(false)}
+        />
+      ) : null}
       {showUpdateOverlay ? (
         <UpdateOverlay state={currentState} onInstall={handleInstallUpdate} />
       ) : null}
@@ -486,6 +510,16 @@ export function DashboardShell() {
         <Panel
           title="Remote access"
           description="Loopback-only origin for a named Cloudflare Tunnel. Public auth should be handled by Cloudflare Access."
+          headerAction={
+            <button
+              className="infoButton"
+              type="button"
+              aria-label="Open remote access setup guide"
+              onClick={() => setShowRemoteAccessInfo(true)}
+            >
+              i
+            </button>
+          }
         >
           <label className="fieldLabel" htmlFor="remote-access-enabled">
             Remote access mode
@@ -686,6 +720,88 @@ function UpdateOverlay({
   );
 }
 
+function RemoteAccessInfoOverlay({
+  port,
+  onClose,
+}: {
+  port: number;
+  onClose: () => void;
+}) {
+  return (
+    <section
+      className="overlayBackdrop"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="remote-access-guide-title"
+      onClick={onClose}
+    >
+      <div className="card infoOverlay" onClick={(event) => event.stopPropagation()}>
+        <div className="overlayHeader">
+          <div>
+            <p className="eyebrow">Remote access guide</p>
+            <h2 id="remote-access-guide-title">What you need before enabling Cloudflare access</h2>
+          </div>
+          <button className="infoCloseButton" type="button" onClick={onClose} aria-label="Close guide">
+            Close
+          </button>
+        </div>
+
+        <div className="infoGrid">
+          <article className="infoBlock">
+            <h3>Accounts and ownership</h3>
+            <ul>
+              <li>Create or use a Cloudflare account that owns the domain you want to publish.</li>
+              <li>Move the domain&apos;s DNS to Cloudflare so the tunnel hostname can be routed there.</li>
+              <li>Pick the public hostname you want users to open, such as `radio.example.com`.</li>
+            </ul>
+          </article>
+
+          <article className="infoBlock">
+            <h3>Security model</h3>
+            <ul>
+              <li>Use Cloudflare Access as the public auth layer instead of exposing the local port directly.</li>
+              <li>Create an Access application for the hostname and require your allowed emails, groups, or identity provider.</li>
+              <li>Do not port-forward the local Siylo ports. Only the tunnel should reach `127.0.0.1:{port}`.</li>
+            </ul>
+          </article>
+
+          <article className="infoBlock">
+            <h3>Tunnel setup</h3>
+            <ul>
+              <li>Download and install `cloudflared` on this Windows machine.</li>
+              <li>Run `cloudflared tunnel login` so this machine can create or use your tunnel.</li>
+              <li>Create a named tunnel such as `siylo-radio` and keep that exact name consistent with the app.</li>
+              <li>Route your chosen hostname to the tunnel in Cloudflare DNS.</li>
+            </ul>
+          </article>
+
+          <article className="infoBlock">
+            <h3>Local origin target</h3>
+            <ul>
+              <li>Point the tunnel at `http://127.0.0.1:{port}` for the Siylo remote access proxy.</li>
+              <li>Keep the app&apos;s remote access toggle disabled until `cloudflared` is installed and the tunnel is ready.</li>
+              <li>After enabling, confirm the public hostname loads through Cloudflare Access before relying on it remotely.</li>
+            </ul>
+          </article>
+        </div>
+
+        <div className="infoChecklist">
+          <h3>Suggested checklist</h3>
+          <div className="pillWrap">
+            <span className="pill">Cloudflare account</span>
+            <span className="pill">Domain on Cloudflare</span>
+            <span className="pill">Named tunnel: siylo-radio</span>
+            <span className="pill">cloudflared installed</span>
+            <span className="pill">DNS route created</span>
+            <span className="pill">Access policy enabled</span>
+            <span className="pill">{`Origin set to 127.0.0.1:${port}`}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function formatTimestamp(value: string) {
   const date = new Date(value);
 
@@ -716,10 +832,12 @@ function formatBytes(value: number) {
 function Panel({
   title,
   description,
+  headerAction,
   children,
 }: {
   title: string;
   description: string;
+  headerAction?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -729,6 +847,7 @@ function Panel({
           <h2>{title}</h2>
           <p>{description}</p>
         </div>
+        {headerAction ? <div className="panelAction">{headerAction}</div> : null}
       </div>
       {children}
     </section>
