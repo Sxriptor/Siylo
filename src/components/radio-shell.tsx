@@ -61,6 +61,7 @@ export function RadioShell() {
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
 
   const streamRef = useRef<MediaStream | null>(null);
+  const streamRequestRef = useRef<Promise<MediaStream> | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const activePointerIdRef = useRef<number | null>(null);
@@ -277,7 +278,7 @@ export function RadioShell() {
     lastSessionTapRef.current = null;
 
     try {
-      const stream = await getOrCreateStream(streamRef);
+      const stream = await getOrCreateStream(streamRef, streamRequestRef);
 
       if (activePointerIdRef.current !== pointerId) {
         return;
@@ -340,6 +341,9 @@ export function RadioShell() {
       (target.closest<HTMLElement>("[data-launcher-trigger='true']") ? "__launcher__" : null);
     holdStartedRef.current = false;
     clearHoldTimer(holdTimerRef);
+    void getOrCreateStream(streamRef, streamRequestRef).catch(() => {
+      // Surface the real failure when the long-press recording path runs.
+    });
     holdTimerRef.current = window.setTimeout(() => {
       if (activePointerIdRef.current !== pointerId) {
         return;
@@ -590,22 +594,17 @@ export function RadioShell() {
         }
 
         event.preventDefault();
-        event.currentTarget.setPointerCapture(event.pointerId);
+        trySetPointerCapture(event.currentTarget, event.pointerId);
         handlePressStart(event.pointerId, event.target as HTMLElement);
       }}
       onPointerUp={(event) => {
         event.preventDefault();
-
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
+        tryReleasePointerCapture(event.currentTarget, event.pointerId);
 
         handleHoldEnd(event.pointerId);
       }}
       onPointerCancel={(event) => {
-        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-          event.currentTarget.releasePointerCapture(event.pointerId);
-        }
+        tryReleasePointerCapture(event.currentTarget, event.pointerId);
 
         handleHoldEnd(event.pointerId);
       }}
@@ -757,9 +756,9 @@ export function RadioShell() {
         </div>
       ) : null}
 
-      <div className={styles.micIconContainer}>
+      <div className={`${styles.micIconContainer} ${isListening ? styles.micIconContainerActive : ""}`}>
         <svg
-          className={styles.micIcon}
+          className={`${styles.micIcon} ${isListening ? styles.micIconActive : ""}`}
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
@@ -843,23 +842,55 @@ function ensureSessionGraceTimeout(
   }, PENDING_SESSION_GRACE_MS);
 }
 
-async function getOrCreateStream(streamRef: RefObject<MediaStream | null>) {
+async function getOrCreateStream(
+  streamRef: RefObject<MediaStream | null>,
+  streamRequestRef: MutableRefObject<Promise<MediaStream> | null>
+) {
   const existing = streamRef.current;
 
   if (existing && existing.active) {
     return existing;
   }
 
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true
-    }
-  });
+  if (streamRequestRef.current) {
+    return streamRequestRef.current;
+  }
 
-  streamRef.current = stream;
-  return stream;
+  streamRequestRef.current = navigator.mediaDevices
+    .getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    })
+    .then((stream) => {
+      streamRef.current = stream;
+      return stream;
+    })
+    .finally(() => {
+      streamRequestRef.current = null;
+    });
+
+  return streamRequestRef.current;
+}
+
+function trySetPointerCapture(target: HTMLElement, pointerId: number) {
+  try {
+    target.setPointerCapture(pointerId);
+  } catch {
+    // Some mobile browsers can reject pointer capture during gesture transitions.
+  }
+}
+
+function tryReleasePointerCapture(target: HTMLElement, pointerId: number) {
+  try {
+    if (target.hasPointerCapture(pointerId)) {
+      target.releasePointerCapture(pointerId);
+    }
+  } catch {
+    // Ignore missing capture state so release does not break hold handling.
+  }
 }
 
 function getSupportedMimeType() {

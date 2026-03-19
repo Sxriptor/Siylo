@@ -244,12 +244,29 @@
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.08);
   color: rgba(244, 247, 251, 0.76);
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.24);
+  transition:
+    background 140ms ease,
+    color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
   z-index: 1;
+}
+
+.micIconContainerActive {
+  background: rgba(225, 76, 76, 0.22);
+  color: #ff6b6b;
+  box-shadow: 0 16px 36px rgba(166, 28, 28, 0.34);
 }
 
 .micIcon {
   width: 28px;
   height: 28px;
+  transition: transform 140ms ease;
+}
+
+.micIconActive {
+  transform: scale(1.06);
 }
 
 @media (max-width: 640px) {

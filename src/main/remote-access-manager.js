@@ -1,4 +1,4 @@
-const { appendLog, setRemoteAccessState } = require("./state");
+const { appendLog, getConfig, getStateSnapshot, setRemoteAccessState } = require("./state");
 const {
   isCloudflaredTunnelRunning,
   startCloudflaredTunnel,
@@ -17,6 +17,20 @@ async function startRemoteAccess(options = {}) {
     ...currentOptions,
     ...options
   };
+
+  const config = getConfig();
+  if (!config.remoteAccessEnabled) {
+    const localUrls = [`http://127.0.0.1:${config.remoteAccessPort}/radio`];
+    setRemoteAccessState({
+      status: "stopped",
+      port: config.remoteAccessPort,
+      url: localUrls[0],
+      localUrls,
+      lastError: ""
+    });
+    appendLog("info", "Remote access start skipped because remote access is disabled.");
+    return getStateSnapshot();
+  }
 
   setRemoteAccessState({
     status: "starting",
@@ -77,7 +91,7 @@ function isRemoteAccessRunning() {
 }
 
 function requireState() {
-  return require("./state").getStateSnapshot();
+  return getStateSnapshot();
 }
 
 module.exports = {
