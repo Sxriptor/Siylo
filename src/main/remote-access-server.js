@@ -147,7 +147,11 @@ async function handleRemoteAccessRequest(request, response) {
     return;
   }
 
-  if (requestUrl.pathname === "/health" || requestUrl.pathname === "/voice") {
+  if (
+    requestUrl.pathname === "/health" ||
+    requestUrl.pathname === "/voice" ||
+    requestUrl.pathname.startsWith("/sessions/")
+  ) {
     await proxyRequest(request, response, buildVoiceProxyUrl(requestUrl));
     return;
   }
