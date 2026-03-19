@@ -1,6 +1,6 @@
 "use client";
 
-import type { MutableRefObject, RefObject } from "react";
+import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
@@ -11,6 +11,7 @@ const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, ""
 const HOLD_TO_RECORD_DELAY_MS = 1000;
 const DOUBLE_TAP_WINDOW_MS = 360;
 const SESSION_POLL_INTERVAL_MS = 900;
+const PENDING_SESSION_GRACE_MS = 5000;
 
 type RadioStatus = "idle" | "listening" | "processing" | "executed" | "error";
 
@@ -73,6 +74,8 @@ export function RadioShell() {
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionIdsRef = useRef(sessionIds);
   const terminalInputRef = useRef<HTMLInputElement | null>(null);
+  const confirmedSessionIdsRef = useRef<string[]>([]);
+  const pendingSessionTimeoutsRef = useRef<Record<string, number>>({});
 
   const isBusy = status === "processing";
   const isListening = status === "listening";
@@ -143,12 +146,20 @@ export function RadioShell() {
 
       if (!health) {
         setVoiceApiBase("");
-        setSessionIds([]);
         return;
       }
 
+      const confirmedSessionIds = mergeSessionIds(health.payload.sessions?.map((session) => session.id) || []);
+      confirmedSessionIdsRef.current = confirmedSessionIds;
+      clearConfirmedPendingSessionTimeouts(confirmedSessionIds, pendingSessionTimeoutsRef.current);
+      const visibleSessionIds = sessionIdsRef.current;
+      for (const sessionId of visibleSessionIds) {
+        if (!confirmedSessionIds.includes(sessionId)) {
+          ensureSessionGraceTimeout(sessionId, pendingSessionTimeoutsRef, confirmedSessionIdsRef, setSessionIds);
+        }
+      }
       setVoiceApiBase(health.baseUrl);
-      setSessionIds(mergeSessionIds(health.payload.sessions?.map((session) => session.id) || []));
+      setSessionIds(mergeSessionIds([...confirmedSessionIds, ...visibleSessionIds]));
     }
 
     void refreshHealth();
@@ -234,6 +245,7 @@ export function RadioShell() {
   useEffect(() => {
     return () => {
       clearHoldTimer(holdTimerRef);
+      clearPendingSessionTimeouts(pendingSessionTimeoutsRef.current);
 
       if (recorderRef.current?.state === "recording") {
         recorderRef.current.stop();
@@ -548,8 +560,18 @@ export function RadioShell() {
       return;
     }
 
-    setSessionIds((currentIds) => mergeSessionIds([payload.sessionId || "", ...currentIds]));
-    setCurrentSessionId(payload.sessionId);
+    const sessionId = normalizeSessionId(payload.sessionId);
+    if (!sessionId) {
+      return;
+    }
+
+    registerPendingSession(
+      sessionId,
+      pendingSessionTimeoutsRef,
+      confirmedSessionIdsRef,
+      setSessionIds
+    );
+    setCurrentSessionId(sessionId);
   }
 
   return (
@@ -763,6 +785,64 @@ function clearHoldTimer(timerRef: MutableRefObject<number | null>) {
   timerRef.current = null;
 }
 
+function clearPendingSessionTimeouts(timeouts: Record<string, number>) {
+  for (const timeoutId of Object.values(timeouts)) {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function clearConfirmedPendingSessionTimeouts(
+  confirmedSessionIds: string[],
+  pendingSessionTimeouts: Record<string, number>
+) {
+  for (const sessionId of confirmedSessionIds) {
+    const timeoutId = pendingSessionTimeouts[sessionId];
+    if (!timeoutId) {
+      continue;
+    }
+
+    window.clearTimeout(timeoutId);
+    delete pendingSessionTimeouts[sessionId];
+  }
+}
+
+function registerPendingSession(
+  sessionId: string,
+  pendingSessionTimeoutsRef: MutableRefObject<Record<string, number>>,
+  confirmedSessionIdsRef: MutableRefObject<string[]>,
+  setSessionIds: Dispatch<SetStateAction<string[]>>
+) {
+  const existingTimeoutId = pendingSessionTimeoutsRef.current[sessionId];
+  if (existingTimeoutId) {
+    window.clearTimeout(existingTimeoutId);
+    delete pendingSessionTimeoutsRef.current[sessionId];
+  }
+
+  ensureSessionGraceTimeout(sessionId, pendingSessionTimeoutsRef, confirmedSessionIdsRef, setSessionIds);
+  setSessionIds((currentIds) => mergeSessionIds([sessionId, ...currentIds]));
+}
+
+function ensureSessionGraceTimeout(
+  sessionId: string,
+  pendingSessionTimeoutsRef: MutableRefObject<Record<string, number>>,
+  confirmedSessionIdsRef: MutableRefObject<string[]>,
+  setSessionIds: Dispatch<SetStateAction<string[]>>
+) {
+  if (pendingSessionTimeoutsRef.current[sessionId]) {
+    return;
+  }
+
+  pendingSessionTimeoutsRef.current[sessionId] = window.setTimeout(() => {
+    delete pendingSessionTimeoutsRef.current[sessionId];
+
+    if (confirmedSessionIdsRef.current.includes(sessionId)) {
+      return;
+    }
+
+    setSessionIds((currentIds) => currentIds.filter((currentSessionId) => currentSessionId !== sessionId));
+  }, PENDING_SESSION_GRACE_MS);
+}
+
 async function getOrCreateStream(streamRef: RefObject<MediaStream | null>) {
   const existing = streamRef.current;
 
@@ -902,6 +982,10 @@ function mergeSessionIds(sessionIds: string[]) {
     .filter(Boolean);
 
   return Array.from(new Set(merged));
+}
+
+function normalizeSessionId(sessionId: string | null | undefined) {
+  return mergeSessionIds([sessionId || ""])[0] || "";
 }
 
 function buildSessionSlots(sessionIds: string[]) {

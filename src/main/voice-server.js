@@ -345,7 +345,7 @@ async function handleSessionInputRequest(sessionId, payload) {
   const key = String(payload?.key || "").trim();
 
   if (text) {
-    await sendTextToSession(sessionId, text);
+    await sendTextToSession(sessionId, text, { allowBusy: true });
   } else if (key) {
     await sendKeyToSession(sessionId, key);
   } else {

@@ -109,10 +109,12 @@ async function createManagedSession(shell, options = {}) {
   return session;
 }
 
-async function sendCommandToSession(sessionId, commandText) {
+async function sendCommandToSession(sessionId, commandText, options = {}) {
   const session = requireSession(sessionId);
   const runtime = requireRuntimeSession(sessionId);
-  ensureSessionReadyForInput(sessionId, runtime);
+  if (!options.allowBusy) {
+    ensureSessionReadyForInput(sessionId, runtime);
+  }
 
   runtime.process.write(commandText);
   await delay(90);
@@ -126,10 +128,12 @@ async function sendCommandToSession(sessionId, commandText) {
   );
 }
 
-async function sendTextToSession(sessionId, commandText) {
+async function sendTextToSession(sessionId, commandText, options = {}) {
   const session = requireSession(sessionId);
   const runtime = requireRuntimeSession(sessionId);
-  ensureSessionReadyForInput(sessionId, runtime);
+  if (!options.allowBusy) {
+    ensureSessionReadyForInput(sessionId, runtime);
+  }
 
   runtime.process.write(commandText);
   await delay(90);
@@ -246,6 +250,8 @@ function requireRuntimeSession(sessionId) {
 }
 
 function ensureSessionReadyForInput(sessionId, runtime) {
+  runtime.isBusy = detectBusyState(runtime.recentOutput);
+
   if (runtime.isBusy) {
     throw new Error(
       `Session ${sessionId} appears busy. Wait for the current run to finish or send \`${sessionId} ctrl+c\` first.`
@@ -421,14 +427,16 @@ function isCodexCliStatusLine(value) {
 
 function detectBusyState(value) {
   const compact = value.toLowerCase();
-  if (hasInteractivePrompt(compact) || hasCompletionFooter(compact)) {
+  const tail = compact.slice(-1600);
+
+  if (hasInteractivePrompt(tail) || hasCompletionFooter(tail)) {
     return false;
   }
 
   return (
-    compact.includes("esc to interrupt") ||
-    /\bworking\d*\s*\(\d+s/.test(compact) ||
-    /^working\d*$/m.test(compact)
+    tail.includes("esc to interrupt") ||
+    /\bworking\d*\s*\(\d+s/.test(tail) ||
+    /^working\d*$/m.test(tail)
   );
 }
 
@@ -447,7 +455,11 @@ function hasCompletionFooter(value) {
 }
 
 function hasInteractivePrompt(value) {
-  return /(?:^|\n)(?:ps\s+)?[a-z]:\\[^\n>]*>\s*$/im.test(value) || /(?:^|\n)~\\[^\n>]*>\s*$/im.test(value);
+  return (
+    /(?:^|\n)(?:ps\s+)?[a-z]:\\[^\n>]*>\s*$/im.test(value) ||
+    /(?:^|\n)~\\[^\n>]*>\s*$/im.test(value) ||
+    /(?:^|\n)\s*[>›»❯]\s*$/m.test(value)
+  );
 }
 
 function formatError(error) {
