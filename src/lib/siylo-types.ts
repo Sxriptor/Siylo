@@ -1,6 +1,9 @@
 export type SiyloConfig = {
   botToken: string;
   openAIApiKeyConfigured: boolean;
+  elevenLabsApiKeyConfigured: boolean;
+  elevenLabsVoiceId: string;
+  elevenLabsModelId: string;
   authorizedUsers: string[];
   dashboardPort: number;
   voiceServerPort: number;
@@ -15,6 +18,8 @@ export type SiyloConfig = {
 export type SiyloConfigUpdate = Partial<SiyloConfig> & {
   openAIApiKey?: string;
   clearOpenAIApiKey?: boolean;
+  elevenLabsApiKey?: string;
+  clearElevenLabsApiKey?: boolean;
   remoteAccessPassword?: string;
 };
 

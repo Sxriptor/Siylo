@@ -149,7 +149,9 @@ async function handleRemoteAccessRequest(request, response) {
 
   if (
     requestUrl.pathname === "/health" ||
+    requestUrl.pathname === "/tts" ||
     requestUrl.pathname === "/voice" ||
+    requestUrl.pathname.startsWith("/desktop/") ||
     requestUrl.pathname.startsWith("/sessions/")
   ) {
     await proxyRequest(request, response, buildVoiceProxyUrl(requestUrl));
@@ -208,6 +210,10 @@ async function serveStaticRequest(request, response, requestUrl) {
 
   const filePath = resolveStaticFilePath(requestUrl.pathname);
   if (!filePath) {
+    if (serveNextAssetFallback(request, response, requestUrl.pathname)) {
+      return;
+    }
+
     sendText(response, 404, "Not found.");
     return;
   }
@@ -224,6 +230,107 @@ async function serveStaticRequest(request, response, requestUrl) {
   }
 
   fs.createReadStream(filePath).pipe(response);
+}
+
+function serveNextAssetFallback(request, response, requestPathname) {
+  const productionRoot = currentOptions?.productionRoot || "";
+  if (!productionRoot || !requestPathname.startsWith("/_next/static/")) {
+    return false;
+  }
+
+  const normalizedPath = decodeURIComponent(requestPathname || "");
+  const method = String(request.method || "GET").toUpperCase();
+  const isHead = method === "HEAD";
+
+  if (normalizedPath.endsWith(".css")) {
+    const cssFiles = listFiles(path.join(productionRoot, "_next", "static", "css"), ".css");
+    if (cssFiles.length === 0) {
+      return false;
+    }
+
+    response.writeHead(200, {
+      "Content-Type": "text/css; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+
+    if (isHead) {
+      response.end();
+      return true;
+    }
+
+    response.end(cssFiles.map((cssFile) => fs.readFileSync(cssFile, "utf8")).join("\n"));
+    return true;
+  }
+
+  const fallbackFilePath = resolveNextJavaScriptFallback(productionRoot, normalizedPath);
+  if (fallbackFilePath) {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "public, max-age=300"
+    });
+
+    if (isHead) {
+      response.end();
+      return true;
+    }
+
+    fs.createReadStream(fallbackFilePath).pipe(response);
+    return true;
+  }
+
+  if (normalizedPath.endsWith("/app-pages-internals.js")) {
+    response.writeHead(200, {
+      "Content-Type": "application/javascript; charset=utf-8",
+      "Cache-Control": "no-cache"
+    });
+    response.end(isHead ? undefined : "self.__next_app_pages_internals_fallback__=true;\n");
+    return true;
+  }
+
+  return false;
+}
+
+function resolveNextJavaScriptFallback(productionRoot, requestPathname) {
+  const basename = path.basename(requestPathname);
+  const chunksRoot = path.join(productionRoot, "_next", "static", "chunks");
+  const fallbackPatterns = [
+    ["main-app.js", /^main-app-[\w-]+\.js$/],
+    ["main.js", /^main-[\w-]+\.js$/],
+    ["webpack.js", /^webpack-[\w-]+\.js$/],
+    ["polyfills.js", /^polyfills-[\w-]+\.js$/],
+    ["layout.js", /^layout-[\w-]+\.js$/],
+    ["page.js", /^page-[\w-]+\.js$/]
+  ];
+  const fallbackPattern = fallbackPatterns.find(([name]) => name === basename)?.[1];
+
+  if (!fallbackPattern) {
+    return "";
+  }
+
+  return listFiles(chunksRoot, ".js").find((filePath) => fallbackPattern.test(path.basename(filePath))) || "";
+}
+
+function listFiles(rootDirectory, extension) {
+  if (!rootDirectory || !fs.existsSync(rootDirectory)) {
+    return [];
+  }
+
+  const files = [];
+  const entries = fs.readdirSync(rootDirectory, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const entryPath = path.join(rootDirectory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listFiles(entryPath, extension));
+      continue;
+    }
+
+    if (entry.isFile() && entry.name.toLowerCase().endsWith(extension)) {
+      files.push(entryPath);
+    }
+  }
+
+  return files.sort();
 }
 
 function resolveStaticFilePath(requestPathname) {

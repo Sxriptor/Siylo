@@ -1,6 +1,6 @@
 "use client";
 
-import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
+import type { Dispatch, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
@@ -9,11 +9,15 @@ const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
 const SESSION_STORAGE_KEY = "siylo-radio-session-id";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
-const DOUBLE_TAP_WINDOW_MS = 360;
 const SESSION_POLL_INTERVAL_MS = 900;
 const PENDING_SESSION_GRACE_MS = 5000;
+const MIN_AUDIBLE_PEAK = 0.015;
+const MIN_AUDIBLE_RMS = 0.003;
+const TRACKPAD_TOUCH_DEADZONE_PX = 6;
+const TRACKPAD_TOUCH_SENSITIVITY = 0.62;
 
 type RadioStatus = "idle" | "listening" | "processing" | "executed" | "error";
+type RadioView = "sessions" | "viewer";
 
 type VoiceResponse = {
   output?: string;
@@ -35,6 +39,11 @@ type SessionStreamResponse = {
   status?: string;
 };
 
+type DesktopFrameState = {
+  screenWidth: number;
+  screenHeight: number;
+};
+
 type HealthResponse = {
   status?: string;
   voice?: {
@@ -53,6 +62,7 @@ export function RadioShell() {
   const [currentSessionId, setCurrentSessionId] = useState(DEFAULT_SESSION_IDS[0]);
   const [voiceApiBase, setVoiceApiBase] = useState("");
   const [status, setStatus] = useState<RadioStatus>("idle");
+  const [activeView, setActiveView] = useState<RadioView>("sessions");
   const [isPressingToRecord, setIsPressingToRecord] = useState(false);
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
   const [inspectorSessionId, setInspectorSessionId] = useState<string | null>(null);
@@ -60,10 +70,18 @@ export function RadioShell() {
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
   const [terminalInput, setTerminalInput] = useState("");
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
+  const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
+  const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
+  const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
+  const [viewerZoom, setViewerZoom] = useState(1);
+  const [viewerSize, setViewerSize] = useState({ width: 1, height: 1 });
+  const [viewerStreamStatus, setViewerStreamStatus] = useState<"loading" | "streaming" | "fallback">("loading");
+  const [viewerFallbackImageUrl, setViewerFallbackImageUrl] = useState("");
 
   const streamRef = useRef<MediaStream | null>(null);
   const streamRequestRef = useRef<Promise<MediaStream> | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const viewerWindowRef = useRef<HTMLDivElement | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const activePointerIdRef = useRef<number | null>(null);
   const holdTimerRef = useRef<number | null>(null);
@@ -78,11 +96,31 @@ export function RadioShell() {
   const terminalInputRef = useRef<HTMLInputElement | null>(null);
   const confirmedSessionIdsRef = useRef<string[]>([]);
   const pendingSessionTimeoutsRef = useRef<Record<string, number>>({});
+  const desktopPointerSendRef = useRef(0);
+  const viewerCursorRef = useRef(viewerCursor);
+  const viewerFallbackImageUrlRef = useRef("");
+  const speechAudioRef = useRef<HTMLAudioElement | null>(null);
+  const wasInspectorBusyRef = useRef(false);
+  const spokenOutputSignatureRef = useRef("");
+  const viewerPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
+  const viewerPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
+  const viewerTouchDragRef = useRef<{
+    lastX: number;
+    lastY: number;
+    moved: boolean;
+    pointerId: number;
+    startX: number;
+    startY: number;
+  } | null>(null);
 
   const isBusy = status === "processing";
   const isListening = status === "listening";
   const sessionSlots = useMemo(() => buildSessionSlots(sessionIds), [sessionIds]);
   const inspectorStatusLabel = getInspectorStatusLabel(sessionStream);
+  const viewerZoomPercent = Math.round(viewerZoom * 100);
+  const desktopStreamUrl = voiceApiBase ? `${voiceApiBase}/desktop/stream?fps=5` : "";
+  const desktopViewerImageUrl = viewerStreamStatus === "fallback" ? viewerFallbackImageUrl : desktopStreamUrl;
+  const viewerLayout = getViewerLayout(viewerZoom, viewerCursor, desktopFrame, viewerSize);
 
   useEffect(() => {
     const storedSessionId = window.localStorage.getItem(SESSION_STORAGE_KEY);
@@ -105,6 +143,10 @@ export function RadioShell() {
     activeSessionIdRef.current = currentSessionId;
     window.localStorage.setItem(SESSION_STORAGE_KEY, currentSessionId);
   }, [currentSessionId]);
+
+  useEffect(() => {
+    viewerCursorRef.current = viewerCursor;
+  }, [viewerCursor]);
 
   useEffect(() => {
     sessionIdsRef.current = sessionIds;
@@ -135,6 +177,56 @@ export function RadioShell() {
     navigator.serviceWorker.register("/sw.js").catch(() => {
       // Registration failure should not block the radio flow.
     });
+  }, []);
+
+  useEffect(() => {
+    const viewportMeta = document.querySelector<HTMLMetaElement>("meta[name='viewport']");
+    const previousViewportContent = viewportMeta?.getAttribute("content") || "";
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousBodyTouchAction = document.body.style.touchAction;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    const previousDocumentTouchAction = document.documentElement.style.touchAction;
+    const lockedViewportContent =
+      "width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, viewport-fit=cover, user-scalable=no";
+
+    if (viewportMeta) {
+      viewportMeta.setAttribute("content", lockedViewportContent);
+    }
+    document.body.style.overflow = "hidden";
+    document.body.style.touchAction = "none";
+    document.documentElement.style.overflow = "hidden";
+    document.documentElement.style.touchAction = "none";
+
+    const preventGestureZoom = (event: Event) => {
+      event.preventDefault();
+    };
+    const preventTouchZoom = (event: TouchEvent) => {
+      if (event.touches.length > 1) {
+        event.preventDefault();
+      }
+    };
+
+    document.addEventListener("gesturestart", preventGestureZoom, { passive: false });
+    document.addEventListener("gesturechange", preventGestureZoom, { passive: false });
+    document.addEventListener("gestureend", preventGestureZoom, { passive: false });
+    document.addEventListener("touchmove", preventTouchZoom, { passive: false });
+    document.addEventListener("dblclick", preventGestureZoom, { passive: false });
+
+    return () => {
+      if (viewportMeta) {
+        viewportMeta.setAttribute("content", previousViewportContent);
+      }
+      document.body.style.overflow = previousBodyOverflow;
+      document.body.style.touchAction = previousBodyTouchAction;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+      document.documentElement.style.touchAction = previousDocumentTouchAction;
+
+      document.removeEventListener("gesturestart", preventGestureZoom);
+      document.removeEventListener("gesturechange", preventGestureZoom);
+      document.removeEventListener("gestureend", preventGestureZoom);
+      document.removeEventListener("touchmove", preventTouchZoom);
+      document.removeEventListener("dblclick", preventGestureZoom);
+    };
   }, []);
 
   useEffect(() => {
@@ -221,6 +313,145 @@ export function RadioShell() {
   }, [inspectorSessionId, voiceApiBase]);
 
   useEffect(() => {
+    if (!voiceApiBase) {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshDesktopMetrics() {
+      try {
+        const response = await fetch(`${voiceApiBase}/desktop/metrics`, {
+          cache: "no-store"
+        });
+        const payload = (await response.json()) as {
+          screen?: {
+            width?: number;
+            height?: number;
+          };
+        };
+
+        if (cancelled) {
+          return;
+        }
+
+        setDesktopFrame({
+          screenWidth: Number(payload.screen?.width) || 1920,
+          screenHeight: Number(payload.screen?.height) || 1080
+        });
+      } catch {
+        if (!cancelled) {
+          setDesktopFrame({
+            screenWidth: 1920,
+            screenHeight: 1080
+          });
+        }
+      }
+    }
+
+    void refreshDesktopMetrics();
+    const intervalId = window.setInterval(() => {
+      void refreshDesktopMetrics();
+    }, 10000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [voiceApiBase]);
+
+  useEffect(() => {
+    if (activeView !== "viewer" || !voiceApiBase) {
+      return;
+    }
+
+    if (window.matchMedia("(pointer: coarse)").matches) {
+      setViewerStreamStatus("fallback");
+      return;
+    }
+
+    setViewerStreamStatus("loading");
+    const timeoutId = window.setTimeout(() => {
+      setViewerStreamStatus((currentStatus) => currentStatus === "streaming" ? currentStatus : "fallback");
+    }, 2400);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [activeView, voiceApiBase]);
+
+  useEffect(() => {
+    if (activeView !== "viewer" || !voiceApiBase || viewerStreamStatus !== "fallback") {
+      return;
+    }
+
+    let cancelled = false;
+
+    async function refreshFallbackFrame() {
+      try {
+        const response = await fetch(`${voiceApiBase}/desktop/screenshot?format=jpg&t=${Date.now()}`, {
+          cache: "no-store"
+        });
+        if (!response.ok) {
+          throw new Error(`Desktop fallback frame failed with ${response.status}.`);
+        }
+
+        const blob = await response.blob();
+        const nextImageUrl = URL.createObjectURL(blob);
+
+        if (cancelled) {
+          URL.revokeObjectURL(nextImageUrl);
+          return;
+        }
+
+        const previousImageUrl = viewerFallbackImageUrlRef.current;
+        viewerFallbackImageUrlRef.current = nextImageUrl;
+        setViewerFallbackImageUrl(nextImageUrl);
+
+        if (previousImageUrl) {
+          URL.revokeObjectURL(previousImageUrl);
+        }
+      } catch {
+        // Keep retrying while the viewer is open.
+      }
+    }
+
+    void refreshFallbackFrame();
+    const intervalId = window.setInterval(() => {
+      void refreshFallbackFrame();
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [activeView, voiceApiBase, viewerStreamStatus]);
+
+  useEffect(() => {
+    if (!inspectorSessionId || !voiceApiBase || !sessionStream?.outputAvailable) {
+      wasInspectorBusyRef.current = Boolean(sessionStream?.isBusy);
+      return;
+    }
+
+    const isNowBusy = Boolean(sessionStream.isBusy);
+    const wasBusy = wasInspectorBusyRef.current;
+    wasInspectorBusyRef.current = isNowBusy;
+
+    if (isNowBusy || !wasBusy) {
+      return;
+    }
+
+    const speechText = buildTerminalSpeechText(sessionStream.output || "");
+    const speechSignature = `${inspectorSessionId}:${speechText}`;
+    if (!speechText || spokenOutputSignatureRef.current === speechSignature) {
+      return;
+    }
+
+    spokenOutputSignatureRef.current = speechSignature;
+    void speakTerminalOutput(voiceApiBase, speechText, speechAudioRef);
+  }, [inspectorSessionId, sessionStream, voiceApiBase]);
+
+  useEffect(() => {
     if (!inspectorSessionId) {
       return;
     }
@@ -245,6 +476,29 @@ export function RadioShell() {
   }, [isKeyboardOpen]);
 
   useEffect(() => {
+    const viewerWindow = viewerWindowRef.current;
+    if (!viewerWindow || !("ResizeObserver" in window)) {
+      return;
+    }
+
+    const updateViewerSize = () => {
+      const bounds = viewerWindow.getBoundingClientRect();
+      setViewerSize({
+        width: Math.max(bounds.width, 1),
+        height: Math.max(bounds.height, 1)
+      });
+    };
+    const resizeObserver = new ResizeObserver(updateViewerSize);
+
+    updateViewerSize();
+    resizeObserver.observe(viewerWindow);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [activeView]);
+
+  useEffect(() => {
     return () => {
       clearHoldTimer(holdTimerRef);
       clearPendingSessionTimeouts(pendingSessionTimeoutsRef.current);
@@ -255,6 +509,11 @@ export function RadioShell() {
 
       for (const track of streamRef.current?.getTracks() ?? []) {
         track.stop();
+      }
+
+      if (viewerFallbackImageUrlRef.current) {
+        URL.revokeObjectURL(viewerFallbackImageUrlRef.current);
+        viewerFallbackImageUrlRef.current = "";
       }
     };
   }, []);
@@ -302,6 +561,12 @@ export function RadioShell() {
 
         if (audioBlob.size === 0) {
           setStatus("idle");
+          return;
+        }
+
+        const hasSignal = await hasAudibleSignal(audioBlob);
+        if (!hasSignal) {
+          setStatus("error");
           return;
         }
 
@@ -372,24 +637,10 @@ export function RadioShell() {
       }
 
       if (pressedTarget && sessionIdsRef.current.includes(pressedTarget)) {
-        const now = Date.now();
-        const didDoubleTap =
-          lastSessionTapRef.current?.sessionId === pressedTarget &&
-          now - lastSessionTapRef.current.timestamp <= DOUBLE_TAP_WINDOW_MS;
-
         setCurrentSessionId(pressedTarget);
         setStatus("idle");
-
-        if (didDoubleTap) {
-          lastSessionTapRef.current = null;
-          openInspector(pressedTarget);
-          return;
-        }
-
-        lastSessionTapRef.current = {
-          sessionId: pressedTarget,
-          timestamp: now
-        };
+        lastSessionTapRef.current = null;
+        openInspector(pressedTarget);
       }
 
       return;
@@ -417,6 +668,8 @@ export function RadioShell() {
     setIsKeyboardOpen(false);
     setTerminalInput("");
     setIsLauncherOpen(false);
+    wasInspectorBusyRef.current = false;
+    spokenOutputSignatureRef.current = "";
   }
 
   function closeInspector() {
@@ -448,6 +701,10 @@ export function RadioShell() {
       const formData = new FormData();
       formData.append("audio", audioBlob, `radio-input.${getFileExtension(audioBlob.type)}`);
       formData.append("sessionId", sessionId);
+      formData.append(
+        "prompt",
+        "Short terminal command. Transcribe exactly what the speaker says. If the speaker says hello, return hello."
+      );
 
       const response = await fetch(`${resolvedVoiceApiBase}/voice`, {
         method: "POST",
@@ -572,6 +829,238 @@ export function RadioShell() {
     }
   }
 
+  function handleInspectorVoiceButtonStart(pointerId: number) {
+    if (!inspectorSessionId || isBusy || isListening) {
+      return;
+    }
+
+    activePointerIdRef.current = pointerId;
+    setCurrentSessionId(inspectorSessionId);
+    activeSessionIdRef.current = inspectorSessionId;
+    setIsPressingToRecord(true);
+    pressTargetRef.current = inspectorSessionId;
+    holdStartedRef.current = false;
+    clearHoldTimer(holdTimerRef);
+    void getOrCreateStream(streamRef, streamRequestRef).catch(() => {
+      // The recorder path surfaces permission and device failures.
+    });
+    holdTimerRef.current = window.setTimeout(() => {
+      if (activePointerIdRef.current === pointerId) {
+        void handleHoldStart(pointerId);
+      }
+    }, HOLD_TO_RECORD_DELAY_MS);
+  }
+
+  function handleInspectorVoiceButtonEnd(target: HTMLElement, pointerId: number) {
+    tryReleasePointerCapture(target, pointerId);
+    handleHoldEnd(pointerId);
+  }
+
+  async function handleViewerPointer(event: PointerEvent<HTMLDivElement>, click = false) {
+    if (!voiceApiBase || !desktopFrame || !isViewerControlEnabled) {
+      return;
+    }
+
+    const coordinate = resolveViewerCoordinate(event, viewerLayout);
+    if (!coordinate) {
+      return;
+    }
+
+    const ratioX = coordinate.ratioX;
+    const ratioY = coordinate.ratioY;
+    await sendViewerPointer(ratioX, ratioY, click);
+  }
+
+  async function sendViewerPointer(ratioX: number, ratioY: number, click = false) {
+    if (!voiceApiBase || !desktopFrame || !isViewerControlEnabled) {
+      return;
+    }
+
+    const nextCursor = { x: ratioX, y: ratioY };
+    viewerCursorRef.current = nextCursor;
+    setViewerCursor(nextCursor);
+    const now = Date.now();
+    if (!click && now - desktopPointerSendRef.current < 120) {
+      return;
+    }
+
+    desktopPointerSendRef.current = now;
+    const screenWidth = desktopFrame.screenWidth || 1920;
+    const screenHeight = desktopFrame.screenHeight || 1080;
+
+    try {
+      await fetch(`${voiceApiBase}/desktop/input`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          x: Math.round(ratioX * screenWidth),
+          y: Math.round(ratioY * screenHeight),
+          click
+        })
+      });
+    } catch {
+      // Keep the viewer usable even if one pointer packet fails.
+    }
+  }
+
+  function handleViewerPointerDown(event: PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    viewerPointersRef.current.set(event.pointerId, {
+      x: event.clientX,
+      y: event.clientY
+    });
+    trySetPointerCapture(event.currentTarget, event.pointerId);
+
+    if (event.pointerType === "touch" && viewerPointersRef.current.size === 1) {
+      viewerTouchDragRef.current = {
+        lastX: event.clientX,
+        lastY: event.clientY,
+        moved: false,
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY
+      };
+    }
+
+    if (viewerPointersRef.current.size === 2) {
+      const distance = getPointerDistance(viewerPointersRef.current);
+      viewerPinchRef.current = {
+        distance,
+        zoom: viewerZoom
+      };
+    }
+  }
+
+  function handleViewerPointerMove(event: PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (viewerPointersRef.current.has(event.pointerId)) {
+      viewerPointersRef.current.set(event.pointerId, {
+        x: event.clientX,
+        y: event.clientY
+      });
+    }
+
+    if (viewerPointersRef.current.size >= 2 && viewerPinchRef.current) {
+      const nextDistance = getPointerDistance(viewerPointersRef.current);
+      if (nextDistance > 0 && viewerPinchRef.current.distance > 0) {
+        const nextZoom = viewerPinchRef.current.zoom * (nextDistance / viewerPinchRef.current.distance);
+        setViewerZoom(clampZoom(nextZoom));
+      }
+      return;
+    }
+
+    if (event.pointerType === "touch" && viewerTouchDragRef.current?.pointerId === event.pointerId) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const drag = viewerTouchDragRef.current;
+      const totalDeltaX = event.clientX - drag.startX;
+      const totalDeltaY = event.clientY - drag.startY;
+      const movedDistance = Math.hypot(totalDeltaX, totalDeltaY);
+
+      if (movedDistance <= TRACKPAD_TOUCH_DEADZONE_PX) {
+        return;
+      }
+
+      const deltaX = event.clientX - drag.lastX;
+      const deltaY = event.clientY - drag.lastY;
+      drag.lastX = event.clientX;
+      drag.lastY = event.clientY;
+
+      if (movedDistance > TRACKPAD_TOUCH_DEADZONE_PX) {
+        drag.moved = true;
+      }
+
+      const zoomPrecision = 1 / Math.sqrt(Math.max(viewerZoom, 1));
+      const currentCursor = viewerCursorRef.current;
+      const nextCursor = {
+        x: clampRatio(currentCursor.x + (deltaX / Math.max(bounds.width, 1)) * TRACKPAD_TOUCH_SENSITIVITY * zoomPrecision),
+        y: clampRatio(currentCursor.y + (deltaY / Math.max(bounds.height, 1)) * TRACKPAD_TOUCH_SENSITIVITY * zoomPrecision)
+      };
+      void sendViewerPointer(nextCursor.x, nextCursor.y, false);
+      return;
+    }
+
+    void handleViewerPointer(event);
+  }
+
+  function handleViewerPointerUp(event: PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const wasPinching = viewerPointersRef.current.size >= 2;
+    const touchDrag = viewerTouchDragRef.current?.pointerId === event.pointerId
+      ? viewerTouchDragRef.current
+      : null;
+    viewerPointersRef.current.delete(event.pointerId);
+    if (viewerPointersRef.current.size < 2) {
+      viewerPinchRef.current = null;
+    }
+    if (touchDrag) {
+      viewerTouchDragRef.current = null;
+    }
+    tryReleasePointerCapture(event.currentTarget, event.pointerId);
+
+    if (touchDrag) {
+      if (!touchDrag.moved && !wasPinching) {
+        void sendViewerPointer(viewerCursor.x, viewerCursor.y, true);
+      }
+      return;
+    }
+
+    if (!wasPinching) {
+      void handleViewerPointer(event, true);
+    }
+  }
+
+  function handleViewerPointerCancel(event: PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    viewerPointersRef.current.delete(event.pointerId);
+    if (viewerPointersRef.current.size < 2) {
+      viewerPinchRef.current = null;
+    }
+    if (viewerTouchDragRef.current?.pointerId === event.pointerId) {
+      viewerTouchDragRef.current = null;
+    }
+    tryReleasePointerCapture(event.currentTarget, event.pointerId);
+  }
+
+  function handleViewerWheel(event: WheelEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const zoomDelta = event.deltaY < 0 ? 0.12 : -0.12;
+    setViewerZoom((currentZoom) => clampZoom(currentZoom + zoomDelta));
+  }
+
+  function handleViewerZoomButton(delta: number) {
+    setViewerZoom((currentZoom) => clampZoom(currentZoom + delta));
+  }
+
+  function handleViewerImageLoad(event: React.SyntheticEvent<HTMLImageElement>) {
+    const image = event.currentTarget;
+    const naturalWidth = image.naturalWidth;
+    const naturalHeight = image.naturalHeight;
+
+    if (naturalWidth > 0 && naturalHeight > 0) {
+      setDesktopFrame((currentFrame) => {
+        if (
+          currentFrame?.screenWidth === naturalWidth &&
+          currentFrame.screenHeight === naturalHeight
+        ) {
+          return currentFrame;
+        }
+
+        return {
+          screenWidth: naturalWidth,
+          screenHeight: naturalHeight
+        };
+      });
+    }
+
+    setViewerStreamStatus((currentStatus) => currentStatus === "fallback" ? currentStatus : "streaming");
+  }
+
   function applyVoicePayload(payload: VoiceResponse | null) {
     if (!payload?.sessionId) {
       return;
@@ -595,13 +1084,19 @@ export function RadioShell() {
     <main
       className={`${styles.page} ${isListening ? styles.listening : ""}`}
       onPointerDown={(event) => {
+        if (activeView !== "sessions") {
+          return;
+        }
+
         if (event.button !== 0 && event.pointerType === "mouse") {
           return;
         }
 
         if (
           (event.target as HTMLElement).closest(`.${styles.launcherShell}`) ||
-          (event.target as HTMLElement).closest(`.${styles.inspectorShell}`)
+          (event.target as HTMLElement).closest(`.${styles.inspectorShell}`) ||
+          (event.target as HTMLElement).closest(`.${styles.viewerDock}`) ||
+          (event.target as HTMLElement).closest(`.${styles.bottomTabs}`)
         ) {
           return;
         }
@@ -611,40 +1106,124 @@ export function RadioShell() {
         handlePressStart(event.pointerId, event.target as HTMLElement);
       }}
       onPointerUp={(event) => {
+        if (activeView !== "sessions") {
+          return;
+        }
+
         event.preventDefault();
         tryReleasePointerCapture(event.currentTarget, event.pointerId);
 
         handleHoldEnd(event.pointerId);
       }}
       onPointerCancel={(event) => {
+        if (activeView !== "sessions") {
+          return;
+        }
+
         tryReleasePointerCapture(event.currentTarget, event.pointerId);
 
         handleHoldEnd(event.pointerId);
       }}
       onContextMenu={(event) => event.preventDefault()}
     >
-      <div className={styles.sessionContainer}>
-        {sessionSlots.map((slot) =>
-          slot.kind === "session" ? (
-            <div
-              key={slot.id}
-              data-session-id={slot.id}
-              className={`${styles.sessionButton} ${currentSessionId === slot.id ? styles.active : ""}`}
+      {activeView === "sessions" ? (
+        <div className={styles.sessionContainer}>
+          {sessionSlots.map((slot) =>
+            slot.kind === "session" ? (
+              <div
+                key={slot.id}
+                data-session-id={slot.id}
+                className={`${styles.sessionButton} ${currentSessionId === slot.id ? styles.active : ""}`}
+              >
+                <span className={styles.sessionLabel}>{formatSessionLabel(slot.id)}</span>
+              </div>
+            ) : (
+              <div
+                key={slot.id}
+                data-launcher-trigger="true"
+                className={`${styles.sessionButton} ${styles.placeholder}`}
+                aria-label="Open a new session"
+              >
+                <span className={styles.plus}>+</span>
+              </div>
+            )
+          )}
+        </div>
+      ) : null}
+
+      {activeView === "viewer" ? (
+        <section
+          className={`${styles.viewerDock} ${styles.viewerPage}`}
+          aria-label="Remote desktop viewer"
+        >
+          <div
+            ref={viewerWindowRef}
+            className={styles.viewerWindow}
+            onPointerDown={handleViewerPointerDown}
+            onPointerMove={handleViewerPointerMove}
+            onPointerUp={handleViewerPointerUp}
+            onPointerCancel={handleViewerPointerCancel}
+            onWheel={handleViewerWheel}
+          >
+            {desktopFrame && desktopViewerImageUrl ? (
+              <img
+                className={styles.viewerImage}
+                src={desktopViewerImageUrl}
+                alt="Remote desktop"
+                draggable={false}
+                onError={() => setViewerStreamStatus("fallback")}
+                onLoad={handleViewerImageLoad}
+                style={{
+                  height: `${viewerLayout.imageHeight}%`,
+                  left: `${viewerLayout.imageLeft}%`,
+                  top: `${viewerLayout.imageTop}%`,
+                  width: `${viewerLayout.imageWidth}%`
+                }}
+              />
+            ) : (
+              <div className={styles.viewerEmpty}>Desktop viewer waiting for the local agent.</div>
+            )}
+            <span
+              className={styles.viewerCursor}
+              style={{
+                left: `${viewerLayout.cursorLeft}%`,
+                top: `${viewerLayout.cursorTop}%`
+              }}
+            />
+          </div>
+          <div className={styles.viewerBar}>
+            <span>Move to pan. Cursor stays centered until the view hits an edge. Zoom {viewerZoomPercent}%.</span>
+            <button
+              type="button"
+              className={styles.viewerToggle}
+              onClick={() => handleViewerZoomButton(-0.2)}
             >
-              <span className={styles.sessionLabel}>{formatSessionLabel(slot.id)}</span>
-            </div>
-          ) : (
-            <div
-              key={slot.id}
-              data-launcher-trigger="true"
-              className={`${styles.sessionButton} ${styles.placeholder}`}
-              aria-label="Open a new session"
+              Zoom -
+            </button>
+            <button
+              type="button"
+              className={styles.viewerToggle}
+              onClick={() => handleViewerZoomButton(0.2)}
             >
-              <span className={styles.plus}>+</span>
-            </div>
-          )
-        )}
-      </div>
+              Zoom +
+            </button>
+            <button
+              type="button"
+              className={styles.viewerToggle}
+              onClick={() => setViewerZoom(1)}
+            >
+              Reset
+            </button>
+            <button
+              type="button"
+              className={styles.viewerToggle}
+              onClick={() => setIsViewerControlEnabled((currentValue) => !currentValue)}
+            >
+              {isViewerControlEnabled ? "Control on" : "View only"}
+            </button>
+          </div>
+        </section>
+      ) : null}
 
       {isLauncherOpen ? (
         <div className={styles.launcherShell}>
@@ -712,6 +1291,9 @@ export function RadioShell() {
             </pre>
 
             {sessionStream?.error ? <p className={styles.inspectorMessage}>{sessionStream.error}</p> : null}
+            <p className={styles.inspectorHint}>
+              Use the floating Talk button to speak to this terminal. Output speaks once through the current audio device after it stops working; use headphones to avoid feedback.
+            </p>
 
             {isKeyboardOpen ? (
               <form
@@ -766,9 +1348,36 @@ export function RadioShell() {
               </form>
             ) : null}
           </section>
+          <button
+            type="button"
+            className={`${styles.inspectorTalkButton} ${isListening || isPressingToRecord ? styles.inspectorTalkButtonActive : ""}`}
+            aria-label="Hold to speak to this terminal"
+            onPointerDown={(event) => {
+              if (event.button !== 0 && event.pointerType === "mouse") {
+                return;
+              }
+
+              event.preventDefault();
+              event.stopPropagation();
+              trySetPointerCapture(event.currentTarget, event.pointerId);
+              handleInspectorVoiceButtonStart(event.pointerId);
+            }}
+            onPointerUp={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
+            }}
+            onPointerCancel={(event) => {
+              event.stopPropagation();
+              handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
+            }}
+          >
+            <span>{isListening ? "Release" : isPressingToRecord ? "Hold..." : "Talk"}</span>
+          </button>
         </div>
       ) : null}
 
+      {activeView === "sessions" ? (
       <div
         className={`${styles.micIconContainer} ${isListening || isPressingToRecord ? styles.micIconContainerActive : ""}`}
       >
@@ -786,6 +1395,32 @@ export function RadioShell() {
           <line x1="12" x2="12" y1="19" y2="22" />
         </svg>
       </div>
+      ) : null}
+
+      <nav className={styles.bottomTabs} aria-label="Radio navigation">
+        <button
+          type="button"
+          className={`${styles.bottomTab} ${activeView === "sessions" ? styles.bottomTabActive : ""}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            setActiveView("sessions");
+          }}
+        >
+          Terminals
+        </button>
+        <button
+          type="button"
+          className={`${styles.bottomTab} ${activeView === "viewer" ? styles.bottomTabActive : ""}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            setActiveView("viewer");
+          }}
+        >
+          Viewer
+        </button>
+      </nav>
     </main>
   );
 }
@@ -906,6 +1541,175 @@ function tryReleasePointerCapture(target: HTMLElement, pointerId: number) {
   } catch {
     // Ignore missing capture state so release does not break hold handling.
   }
+}
+
+function clampRatio(value: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(value, 1));
+}
+
+function resolveViewerCoordinate(
+  event: PointerEvent<HTMLDivElement>,
+  layout: ReturnType<typeof getViewerLayout>
+) {
+  const bounds = event.currentTarget.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) {
+    return null;
+  }
+
+  const localX = clampRatio((event.clientX - bounds.left) / bounds.width);
+  const localY = clampRatio((event.clientY - bounds.top) / bounds.height);
+
+  return {
+    ratioX: clampRatio(((localX * 100) - layout.imageLeft) / layout.imageWidth),
+    ratioY: clampRatio(((localY * 100) - layout.imageTop) / layout.imageHeight)
+  };
+}
+
+function getViewerLayout(
+  zoom: number,
+  cursor: { x: number; y: number },
+  desktopFrame: DesktopFrameState | null,
+  viewerSize: { width: number; height: number }
+) {
+  const nextZoom = clampZoom(zoom);
+  const desktopAspect = (desktopFrame?.screenWidth || 1920) / Math.max(desktopFrame?.screenHeight || 1080, 1);
+  const viewerAspect = viewerSize.width / Math.max(viewerSize.height, 1);
+  const baseWidth = desktopAspect >= viewerAspect ? 100 : (desktopAspect / viewerAspect) * 100;
+  const baseHeight = desktopAspect >= viewerAspect ? (viewerAspect / desktopAspect) * 100 : 100;
+  const imageWidth = baseWidth * nextZoom;
+  const imageHeight = baseHeight * nextZoom;
+  const imageLeft = resolveViewerAxisOffset(cursor.x, imageWidth);
+  const imageTop = resolveViewerAxisOffset(cursor.y, imageHeight);
+
+  return {
+    cursorLeft: clampPercent(imageLeft + cursor.x * imageWidth, 0, 100),
+    cursorTop: clampPercent(imageTop + cursor.y * imageHeight, 0, 100),
+    imageHeight,
+    imageLeft,
+    imageTop,
+    imageWidth
+  };
+}
+
+function resolveViewerAxisOffset(cursorRatio: number, imageSize: number) {
+  if (imageSize <= 100) {
+    return 50 - imageSize / 2;
+  }
+
+  return clampPercent(50 - cursorRatio * imageSize, 100 - imageSize, 0);
+}
+
+function clampPercent(value: number, min: number, max: number) {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+
+  return Math.max(min, Math.min(value, max));
+}
+
+function clampZoom(value: number) {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.min(value, 4));
+}
+
+function getPointerDistance(pointers: Map<number, { x: number; y: number }>) {
+  const [firstPointer, secondPointer] = Array.from(pointers.values());
+  if (!firstPointer || !secondPointer) {
+    return 0;
+  }
+
+  return Math.hypot(firstPointer.x - secondPointer.x, firstPointer.y - secondPointer.y);
+}
+
+async function hasAudibleSignal(audioBlob: Blob) {
+  const audioWindow = window as Window & {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  const AudioContextConstructor = audioWindow.AudioContext || audioWindow.webkitAudioContext;
+  if (!AudioContextConstructor) {
+    return true;
+  }
+
+  try {
+    const audioContext = new AudioContextConstructor();
+    const audioBuffer = await audioContext.decodeAudioData(await audioBlob.arrayBuffer());
+    await audioContext.close();
+    let peak = 0;
+    let sumSquares = 0;
+    let sampleCount = 0;
+
+    for (let channelIndex = 0; channelIndex < audioBuffer.numberOfChannels; channelIndex += 1) {
+      const channelData = audioBuffer.getChannelData(channelIndex);
+
+      for (let sampleIndex = 0; sampleIndex < channelData.length; sampleIndex += 1) {
+        const sample = Math.abs(channelData[sampleIndex] || 0);
+        peak = Math.max(peak, sample);
+        sumSquares += sample * sample;
+        sampleCount += 1;
+      }
+    }
+
+    const rms = sampleCount > 0 ? Math.sqrt(sumSquares / sampleCount) : 0;
+    return peak >= MIN_AUDIBLE_PEAK || rms >= MIN_AUDIBLE_RMS;
+  } catch {
+    return true;
+  }
+}
+
+function buildTerminalSpeechText(output: string) {
+  const cleanedLines = output
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !/^working\b/i.test(line) && !/\besc to interrupt\b/i.test(line));
+
+  return cleanedLines.slice(-10).join("\n").slice(-1200).trim();
+}
+
+async function speakTerminalOutput(
+  voiceApiBase: string,
+  text: string,
+  speechAudioRef: MutableRefObject<HTMLAudioElement | null>
+) {
+  const response = await fetch(`${voiceApiBase}/tts`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ text })
+  });
+
+  if (!response.ok) {
+    return;
+  }
+
+  const audioBlob = await response.blob();
+  const audioUrl = URL.createObjectURL(audioBlob);
+  const previousAudio = speechAudioRef.current;
+
+  if (previousAudio) {
+    previousAudio.pause();
+    URL.revokeObjectURL(previousAudio.src);
+  }
+
+  const audio = new Audio(audioUrl);
+  speechAudioRef.current = audio;
+  audio.onended = () => {
+    URL.revokeObjectURL(audioUrl);
+    if (speechAudioRef.current === audio) {
+      speechAudioRef.current = null;
+    }
+  };
+  await audio.play().catch(() => {
+    URL.revokeObjectURL(audioUrl);
+  });
 }
 
 function getSupportedMimeType() {

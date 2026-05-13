@@ -5,6 +5,9 @@ const path = require("node:path");
 const defaultConfig = {
   botToken: "",
   openAIApiKeyEncrypted: "",
+  elevenLabsApiKeyEncrypted: "",
+  elevenLabsVoiceId: "",
+  elevenLabsModelId: "",
   authorizedUsers: [],
   dashboardPort: 3000,
   voiceServerPort: 3210,
@@ -94,6 +97,11 @@ function normalizeConfig(nextConfig) {
     openAIApiKeyEncrypted:
       String(nextConfig.openAIApiKeyEncrypted || "").trim() ||
       encryptSecret(nextConfig.openAIApiKey),
+    elevenLabsApiKeyEncrypted:
+      String(nextConfig.elevenLabsApiKeyEncrypted || "").trim() ||
+      encryptSecret(nextConfig.elevenLabsApiKey),
+    elevenLabsVoiceId: String(nextConfig.elevenLabsVoiceId || "").trim(),
+    elevenLabsModelId: String(nextConfig.elevenLabsModelId || "").trim(),
     authorizedUsers: Array.isArray(nextConfig.authorizedUsers)
       ? nextConfig.authorizedUsers.map((value) => String(value || "").trim()).filter(Boolean)
       : [...defaultConfig.authorizedUsers],

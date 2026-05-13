@@ -1,0 +1,77 @@
+. Run npm run dev.
+  2. In the desktop dashboard, enable remote access, set the        
+     username, set a strong password, and save.
+  3. On the phone, download the root CA from
+     http://<PC-IP>:3210/remote-access/certificate.
+  4. Verify its fingerprint matches the one shown in the dashboard, 
+     then trust/install that CA on the phone.
+  5. Open https://<PC-IP>:3443/radio. The browser should prompt for 
+     the username/password and the radio page should stay same-orig 
+     in with the secured backend.
+
+  Validation passed with npm run build, npm run typecheck, node     
+  --check on the new main-process files, a runtime cert-generation  
+  harness, and a stubbed HTTPS proxy test that verified 401 without 
+  auth and successful /radio and /health proxying with auth. I did  
+  not test on a physical phone, so the remaining manual piece is    
+  device-side CA trust and any Windows firewall allowance for ports 
+  3210 and 3443.
+
+
+⚠️ Don’t forget after import
+
+Manually add your tunnel record:
+
+radio.ascendixgear.com → (created by cloudflared command)
+
+If you want, next step I can give you a 1-command setup where you run:
+
+cloudflared tunnel route dns siylo-radio radio.ascendixgear.com
+
+and it wires everything automatically.
+
+
+
+What you need:                                                    
+                                                                    
+  - A Cloudflare account                                            
+  - A domain you control in Cloudflare DNS                          
+  - cloudflared installed on the PC                                 
+  - The Siylo app running locally                                   
+                                                                    
+  What to do:                                                       
+                                                                    
+  1. In Siylo, enable Remote access and save a username/password.   
+  2. Install cloudflared using Cloudflare’s official install        
+     instructions.                                                  
+  3. Log in on the PC:                                              
+                                                                    
+     cloudflared tunnel login                                       
+  4. Create a named tunnel:                                         
+                                                                    
+     cloudflared tunnel create siylo-radio                          
+  5. Create a DNS route for a hostname you own, for example:        
+                                                                    
+     cloudflared tunnel route dns siylo-radio radio.yourdomain.com  
+  6. Create %USERPROFILE%\.cloudflared\config.yml pointing at the   
+     local Siylo origin:                                            
+                                                                    
+     tunnel: siylo-radio                                            
+     credentials-file: C:\Users\YOUR_USER\.cloudflared\<TUNNEL-     
+  UUID>.json                                                        
+                                                                    
+     ingress:                                                       
+       - hostname: radio.yourdomain.com                             
+         service: http://localhost:3443                             
+       - service: http_status:404                                   
+  7. Run the tunnel:                                                
+                                                                    
+     cloudflared tunnel run siylo-radio                             
+  8. In Cloudflare Zero Trust, create an Access app for             
+     radio.yourdomain.com and require your chosen login method.     
+  9. On your phone, open:                                           
+     https://radio.yourdomain.com/radio                             
+  https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/self-hosted-public-app/
+
+  cloudflared tunnel ingress validate
+  cloudflared tunnel run siylo-radio

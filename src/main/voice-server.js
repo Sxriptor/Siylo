@@ -11,6 +11,12 @@ const {
   getTranscriptionProviderName,
   transcribeAudio
 } = require("./transcription-service");
+const {
+  captureDesktopFrame,
+  getPrimaryScreenMetrics,
+  moveDesktopPointer
+} = require("./desktop-control-service");
+const { synthesizeSpeech } = require("./speech-service");
 
 let voiceServer = null;
 
@@ -147,6 +153,59 @@ async function handleRequest(request, response) {
       status: execution.status,
       transcript
     });
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/desktop/screenshot") {
+    const frame = await captureDesktopFrame({
+      format: requestUrl.searchParams.get("format") || "png"
+    });
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": frame.contentType,
+      "X-Screen-Width": String(frame.screen.width || 0),
+      "X-Screen-Height": String(frame.screen.height || 0)
+    });
+    response.end(frame.imageBuffer);
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/desktop/metrics") {
+    const screen = await getPrimaryScreenMetrics().catch(() => ({
+      width: 0,
+      height: 0
+    }));
+    sendJson(response, 200, {
+      screen,
+      status: "ok"
+    });
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/desktop/stream") {
+    await streamDesktopFrames(request, response, requestUrl);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/desktop/input") {
+    const payload = await parseJsonRequest(request);
+    const result = await moveDesktopPointer({
+      x: payload?.x,
+      y: payload?.y,
+      click: Boolean(payload?.click)
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/tts") {
+    const payload = await parseJsonRequest(request);
+    const speech = await synthesizeSpeech(payload?.text || "");
+    response.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": speech.contentType
+    });
+    response.end(speech.audioBuffer);
     return;
   }
 
@@ -377,6 +436,55 @@ function readRequestBody(request, maxBytes = 32 * 1024 * 1024) {
   });
 }
 
+async function streamDesktopFrames(request, response, requestUrl) {
+  const boundary = "siylo-desktop-frame";
+  const requestedFps = Number(requestUrl.searchParams.get("fps") || 4);
+  const fps = Number.isFinite(requestedFps) ? Math.max(1, Math.min(requestedFps, 8)) : 4;
+  const frameDelayMs = Math.round(1000 / fps);
+  let closed = false;
+
+  request.once("close", () => {
+    closed = true;
+  });
+
+  response.writeHead(200, {
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Connection": "keep-alive",
+    "Content-Type": `multipart/x-mixed-replace; boundary=${boundary}`,
+    "Pragma": "no-cache"
+  });
+
+  while (!closed && !response.destroyed) {
+    try {
+      const frame = await captureDesktopFrame({
+        format: "jpg"
+      });
+      response.write(`--${boundary}\r\n`);
+      response.write(`Content-Type: ${frame.contentType}\r\n`);
+      response.write(`Content-Length: ${frame.imageBuffer.length}\r\n`);
+      response.write(`X-Screen-Width: ${frame.screen.width || 0}\r\n`);
+      response.write(`X-Screen-Height: ${frame.screen.height || 0}\r\n\r\n`);
+      response.write(frame.imageBuffer);
+      response.write("\r\n");
+    } catch (error) {
+      appendLog("warn", `Desktop stream frame failed: ${formatError(error)}`);
+      await delay(750);
+    }
+
+    await delay(frameDelayMs);
+  }
+
+  if (!response.destroyed) {
+    response.end();
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
 function resolveVoicePort() {
   const configuredPort = Number(process.env.SIYLO_VOICE_PORT || getStateSnapshot().config.voiceServerPort || 3210);
   return Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : 3210;
@@ -389,6 +497,7 @@ function resolveVoiceHost() {
 
 function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Filename, X-Session-Id, X-Transcript, X-Transcribe-Prompt");
+  response.setHeader("Access-Control-Expose-Headers", "X-Screen-Width, X-Screen-Height");
   response.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Content-Type", "application/json; charset=utf-8");

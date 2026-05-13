@@ -45,6 +45,9 @@ const browserFallbackState: SiyloState = {
   config: {
     botToken: "",
     openAIApiKeyConfigured: false,
+    elevenLabsApiKeyConfigured: false,
+    elevenLabsVoiceId: "",
+    elevenLabsModelId: "",
     authorizedUsers: ["123456789012345678", "987654321098765432"],
     dashboardPort: 3000,
     voiceServerPort: 3210,
@@ -81,6 +84,9 @@ export function DashboardShell() {
   const [authorizedUsersInput, setAuthorizedUsersInput] = useState("");
   const [botTokenInput, setBotTokenInput] = useState("");
   const [openAiApiKeyInput, setOpenAiApiKeyInput] = useState("");
+  const [elevenLabsApiKeyInput, setElevenLabsApiKeyInput] = useState("");
+  const [elevenLabsVoiceIdInput, setElevenLabsVoiceIdInput] = useState("");
+  const [elevenLabsModelIdInput, setElevenLabsModelIdInput] = useState("");
   const [remoteAccessPortInput, setRemoteAccessPortInput] = useState("3443");
   const [remoteAccessEnabled, setRemoteAccessEnabled] = useState(false);
   const [showRemoteAccessInfo, setShowRemoteAccessInfo] = useState(false);
@@ -128,6 +134,14 @@ export function DashboardShell() {
   useEffect(() => {
     setRemoteAccessPortInput(String(state.config.remoteAccessPort));
   }, [state.config.remoteAccessPort]);
+
+  useEffect(() => {
+    setElevenLabsVoiceIdInput(state.config.elevenLabsVoiceId || "");
+  }, [state.config.elevenLabsVoiceId]);
+
+  useEffect(() => {
+    setElevenLabsModelIdInput(state.config.elevenLabsModelId || "");
+  }, [state.config.elevenLabsModelId]);
 
   useEffect(() => {
     setRemoteAccessEnabled(state.config.remoteAccessEnabled);
@@ -207,6 +221,11 @@ export function DashboardShell() {
         hint: "Encrypted locally and used by voice transcription when no env var override is set."
       },
       {
+        label: "ElevenLabs API key",
+        value: state.config.elevenLabsApiKeyConfigured ? "Stored" : "Missing",
+        hint: "Encrypted locally and used for terminal speech playback."
+      },
+      {
         label: "Discord runtime",
         value: state.discord.status,
         hint: state.discord.botTag || state.discord.lastError || "No live Discord session yet."
@@ -276,6 +295,9 @@ export function DashboardShell() {
       const nextState = await window.siylo.updateConfig({
         botToken: botTokenInput.trim(),
         ...(openAiApiKeyInput.trim() ? { openAIApiKey: openAiApiKeyInput.trim() } : {}),
+        ...(elevenLabsApiKeyInput.trim() ? { elevenLabsApiKey: elevenLabsApiKeyInput.trim() } : {}),
+        elevenLabsVoiceId: elevenLabsVoiceIdInput.trim(),
+        elevenLabsModelId: elevenLabsModelIdInput.trim(),
         authorizedUsers: authorizedUsersInput
           .split(/\r?\n/)
           .map((value) => value.trim())
@@ -286,6 +308,7 @@ export function DashboardShell() {
 
       setState(nextState);
       setOpenAiApiKeyInput("");
+      setElevenLabsApiKeyInput("");
     } finally {
       setIsSaving(false);
     }
@@ -305,6 +328,25 @@ export function DashboardShell() {
 
       setState(nextState);
       setOpenAiApiKeyInput("");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleClearElevenLabsApiKey() {
+    if (!window.siylo) {
+      return;
+    }
+
+    setIsSaving(true);
+
+    try {
+      const nextState = await window.siylo.updateConfig({
+        clearElevenLabsApiKey: true
+      });
+
+      setState(nextState);
+      setElevenLabsApiKeyInput("");
     } finally {
       setIsSaving(false);
     }
@@ -434,7 +476,7 @@ export function DashboardShell() {
 
         <Panel
           title="Credentials and access"
-          description="Store the Discord bot token, OpenAI key, and allowed user IDs for this machine."
+          description="Store the Discord bot token, OpenAI key, ElevenLabs key, and allowed user IDs for this machine."
         >
           <label className="fieldLabel" htmlFor="bot-token">
             Discord bot token
@@ -469,6 +511,50 @@ export function DashboardShell() {
             Stored in the local config file using OS-backed encryption. Leave blank to keep the
             current key.
           </p>
+          <label className="fieldLabel" htmlFor="elevenlabs-api-key">
+            ElevenLabs API key
+          </label>
+          <input
+            id="elevenlabs-api-key"
+            className="textInput"
+            type="password"
+            value={elevenLabsApiKeyInput}
+            disabled={!isDesktop}
+            autoComplete="off"
+            placeholder={
+              currentState.config.elevenLabsApiKeyConfigured
+                ? "Stored locally. Enter a new key to replace it"
+                : "Paste your ElevenLabs API key"
+            }
+            onChange={(event) => setElevenLabsApiKeyInput(event.target.value)}
+          />
+          <label className="fieldLabel" htmlFor="elevenlabs-voice-id">
+            ElevenLabs voice ID
+          </label>
+          <input
+            id="elevenlabs-voice-id"
+            className="textInput"
+            type="text"
+            value={elevenLabsVoiceIdInput}
+            disabled={!isDesktop}
+            placeholder="Optional. Defaults to Rachel voice"
+            onChange={(event) => setElevenLabsVoiceIdInput(event.target.value)}
+          />
+          <label className="fieldLabel" htmlFor="elevenlabs-model-id">
+            ElevenLabs model ID
+          </label>
+          <input
+            id="elevenlabs-model-id"
+            className="textInput"
+            type="text"
+            value={elevenLabsModelIdInput}
+            disabled={!isDesktop}
+            placeholder="Optional. Defaults to eleven_multilingual_v2"
+            onChange={(event) => setElevenLabsModelIdInput(event.target.value)}
+          />
+          <p className="muted">
+            Terminal speech uses these settings unless `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, or `ELEVENLABS_MODEL_ID` are set in the environment.
+          </p>
           <div className="pillWrap">
             {currentState.config.authorizedUsers.map((userId) => (
               <span key={userId} className="pill">
@@ -501,6 +587,13 @@ export function DashboardShell() {
               disabled={!isDesktop || isSaving || !currentState.config.openAIApiKeyConfigured}
             >
               Clear OpenAI key
+            </button>
+            <button
+              className="actionButton secondary"
+              onClick={handleClearElevenLabsApiKey}
+              disabled={!isDesktop || isSaving || !currentState.config.elevenLabsApiKeyConfigured}
+            >
+              Clear ElevenLabs key
             </button>
           </div>
         </Panel>

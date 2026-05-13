@@ -123,6 +123,14 @@ function updateConfig(partialConfig) {
       partialConfig.botToken === undefined
         ? state.config.botToken
         : String(partialConfig.botToken || "").trim(),
+    elevenLabsVoiceId:
+      partialConfig.elevenLabsVoiceId === undefined
+        ? state.config.elevenLabsVoiceId
+        : String(partialConfig.elevenLabsVoiceId || "").trim(),
+    elevenLabsModelId:
+      partialConfig.elevenLabsModelId === undefined
+        ? state.config.elevenLabsModelId
+        : String(partialConfig.elevenLabsModelId || "").trim(),
     authorizedUsers: Array.isArray(partialConfig.authorizedUsers)
       ? partialConfig.authorizedUsers.map((value) => String(value || "").trim()).filter(Boolean)
       : state.config.authorizedUsers,
@@ -174,6 +182,14 @@ function updateConfig(partialConfig) {
     nextConfig.openAIApiKeyEncrypted = "";
   }
 
+  if (partialConfig.elevenLabsApiKey !== undefined) {
+    nextConfig.elevenLabsApiKeyEncrypted = encryptSecret(partialConfig.elevenLabsApiKey);
+  }
+
+  if (partialConfig.clearElevenLabsApiKey) {
+    nextConfig.elevenLabsApiKeyEncrypted = "";
+  }
+
   state.config = saveConfig({
     ...nextConfig
   });
@@ -204,6 +220,13 @@ function sanitizeConfig(configValue) {
   return {
     botToken: configValue.botToken,
     openAIApiKeyConfigured: Boolean(configValue.openAIApiKeyEncrypted || configValue.openAIApiKey),
+    elevenLabsApiKeyConfigured: Boolean(
+      process.env.ELEVENLABS_API_KEY ||
+      configValue.elevenLabsApiKeyEncrypted ||
+      configValue.elevenLabsApiKey
+    ),
+    elevenLabsVoiceId: configValue.elevenLabsVoiceId,
+    elevenLabsModelId: configValue.elevenLabsModelId,
     authorizedUsers: configValue.authorizedUsers,
     dashboardPort: configValue.dashboardPort,
     voiceServerPort: configValue.voiceServerPort,

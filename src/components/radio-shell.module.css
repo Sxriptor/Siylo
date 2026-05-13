@@ -28,6 +28,127 @@
   z-index: 1;
 }
 
+.viewerDock {
+  position: absolute;
+  top: 18px;
+  left: 50%;
+  z-index: 2;
+  width: min(92vw, 560px);
+  transform: translateX(-50%);
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.viewerPage {
+  inset: 12px 10px 76px;
+  left: 10px;
+  top: 12px;
+  width: auto;
+  transform: none;
+}
+
+.viewerFullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  width: 100vw;
+  padding: 10px;
+  transform: none;
+  background: rgba(1, 4, 10, 0.96);
+}
+
+.viewerWindow {
+  position: relative;
+  height: min(28vh, 220px);
+  min-height: 150px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 20px;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(76, 130, 225, 0.22), transparent 34%),
+    rgba(0, 0, 0, 0.42);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.34);
+  touch-action: none;
+}
+
+.viewerPage .viewerWindow {
+  height: 100%;
+  min-height: 0;
+}
+
+.viewerFullscreen .viewerWindow {
+  height: calc(100vh - 74px);
+  min-height: 0;
+  border-radius: 18px;
+}
+
+.viewerImage {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition:
+    height 120ms linear,
+    left 120ms linear,
+    top 120ms linear,
+    width 120ms linear;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.viewerCursor {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 2px rgba(8, 16, 27, 0.72), 0 0 20px rgba(255, 255, 255, 0.44);
+  pointer-events: none;
+}
+
+.viewerEmpty {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 18px;
+  color: rgba(244, 247, 251, 0.68);
+  text-align: center;
+}
+
+.viewerBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: rgba(244, 247, 251, 0.68);
+  font-size: 0.78rem;
+}
+
+.viewerPage .viewerBar {
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0 2px;
+}
+
+.viewerPage .viewerBar span {
+  flex: 1 1 100%;
+}
+
+.viewerToggle {
+  flex-shrink: 0;
+  min-height: 34px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: #f4f7fb;
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
 .sessionButton {
   display: flex;
   align-items: center;
@@ -210,6 +331,44 @@
   font-size: 0.9rem;
 }
 
+.inspectorHint {
+  margin: -6px 0 0;
+  color: rgba(244, 247, 251, 0.58);
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.inspectorTalkButton {
+  position: absolute;
+  right: max(18px, env(safe-area-inset-right));
+  top: 50%;
+  z-index: 12;
+  display: grid;
+  place-items: center;
+  width: 76px;
+  height: 76px;
+  border: 0;
+  border-radius: 999px;
+  transform: translateY(-50%);
+  background: linear-gradient(145deg, #f4f7fb, #cdd9ec);
+  color: #08101b;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42), 0 0 0 8px rgba(255, 255, 255, 0.08);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.8rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.inspectorTalkButtonActive {
+  background: linear-gradient(145deg, #ff7a7a, #d83c3c);
+  color: #ffffff;
+  box-shadow: 0 18px 52px rgba(166, 28, 28, 0.48), 0 0 0 10px rgba(255, 107, 107, 0.16);
+}
+
 .keyboardDock {
   display: grid;
   gap: 12px;
@@ -233,7 +392,7 @@
 
 .micIconContainer {
   position: absolute;
-  bottom: 28px;
+  bottom: 84px;
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -269,6 +428,38 @@
   transform: scale(1.06);
 }
 
+.bottomTabs {
+  position: absolute;
+  right: 14px;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  left: 14px;
+  z-index: 8;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(8, 12, 20, 0.86);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(16px);
+}
+
+.bottomTab {
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: rgba(244, 247, 251, 0.72);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-weight: 800;
+}
+
+.bottomTabActive {
+  background: #f4f7fb;
+  color: #08101b;
+}
+
 @media (max-width: 640px) {
   .sessionContainer {
     width: min(92vw, 360px);
@@ -283,7 +474,45 @@
     width: min(94vw, 420px);
   }
 
+  .inspectorPanel {
+    padding-right: 74px;
+  }
+
+  .inspectorTalkButton {
+    right: 16px;
+    width: 62px;
+    height: 62px;
+    font-size: 0.7rem;
+  }
+
   .keyboardActions {
     grid-template-columns: 1fr;
+  }
+
+  .viewerDock {
+    width: min(94vw, 420px);
+  }
+
+  .viewerPage {
+    inset: 10px 8px 78px;
+    width: auto;
+  }
+
+  .viewerWindow {
+    height: 142px;
+    min-height: 142px;
+  }
+
+  .viewerBar {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .viewerBar span {
+    flex-basis: 100%;
+  }
+
+  .viewerToggle {
+    flex: 1;
   }
 }

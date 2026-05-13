@@ -33,8 +33,15 @@ async function transcribeAudio({ audioBuffer, contentType, filename, prompt, tra
 
   const formData = new FormData();
   formData.set("model", defaultModel);
+  formData.set("language", "en");
+  formData.set("temperature", "0");
   if (prompt) {
     formData.set("prompt", String(prompt));
+  } else {
+    formData.set(
+      "prompt",
+      "Transcribe short spoken terminal commands exactly. Do not infer polite closings like thank you, thanks, goodbye, or bye unless those exact words are clearly spoken."
+    );
   }
   formData.set(
     "file",
