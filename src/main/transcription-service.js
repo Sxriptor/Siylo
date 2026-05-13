@@ -36,11 +36,11 @@ async function transcribeAudio({ audioBuffer, contentType, filename, prompt, tra
   formData.set("language", "en");
   formData.set("temperature", "0");
   if (prompt) {
-    formData.set("prompt", String(prompt));
-  } else {
     formData.set(
       "prompt",
-      "Transcribe short spoken terminal commands exactly. Do not infer polite closings like thank you, thanks, goodbye, or bye unless those exact words are clearly spoken."
+      String(prompt)
+        .replace(/\bif\s+the\s+speaker\s+says\b/gi, "")
+        .slice(0, 160)
     );
   }
   formData.set(
@@ -63,12 +63,35 @@ async function transcribeAudio({ audioBuffer, contentType, filename, prompt, tra
   }
 
   const payload = await response.json();
-  const nextTranscript = String(payload.text || "").trim();
+  const nextTranscript = sanitizeTranscript(payload.text);
   if (!nextTranscript) {
     throw new Error("Transcription provider returned an empty transcript.");
   }
 
   return nextTranscript;
+}
+
+function sanitizeTranscript(value) {
+  const transcript = String(value || "").replace(/\s+/g, " ").trim();
+  if (!transcript) {
+    return "";
+  }
+
+  if (isPromptLeakTranscript(transcript)) {
+    throw new Error("Transcription matched an internal prompt instead of speech. Please try again.");
+  }
+
+  return transcript;
+}
+
+function isPromptLeakTranscript(transcript) {
+  const normalized = transcript.toLowerCase();
+  return (
+    normalized.includes("if the speaker says") ||
+    normalized.includes("return hello") ||
+    normalized.includes("transcribe exactly") ||
+    normalized.includes("short terminal command")
+  );
 }
 
 function getTranscriptionProviderName() {

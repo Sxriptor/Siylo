@@ -363,6 +363,30 @@
   -webkit-user-select: none;
 }
 
+.inspectorSpeechButton {
+  position: absolute;
+  right: max(24px, calc(env(safe-area-inset-right) + 6px));
+  top: calc(50% + 58px);
+  z-index: 12;
+  width: 64px;
+  min-height: 34px;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 18px;
+  background: rgba(8, 16, 27, 0.92);
+  color: rgba(244, 247, 251, 0.88);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.26);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.inspectorSpeechButtonActive {
+  background: #f4f7fb;
+  color: #08101b;
+}
+
 .inspectorTalkButtonActive {
   background: linear-gradient(145deg, #ff7a7a, #d83c3c);
   color: #ffffff;
@@ -483,6 +507,12 @@
     width: 62px;
     height: 62px;
     font-size: 0.7rem;
+  }
+
+  .inspectorSpeechButton {
+    right: 15px;
+    top: calc(50% + 48px);
+    width: 64px;
   }
 
   .keyboardActions {

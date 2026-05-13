@@ -70,6 +70,7 @@ export function RadioShell() {
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
   const [terminalInput, setTerminalInput] = useState("");
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
+  const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
   const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
   const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
   const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
@@ -102,6 +103,8 @@ export function RadioShell() {
   const speechAudioRef = useRef<HTMLAudioElement | null>(null);
   const wasInspectorBusyRef = useRef(false);
   const spokenOutputSignatureRef = useRef("");
+  const pendingInspectorSpeechSessionRef = useRef<string | null>(null);
+  const speechRequestSeqRef = useRef(0);
   const viewerPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const viewerPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
   const viewerTouchDragRef = useRef<{
@@ -435,9 +438,10 @@ export function RadioShell() {
 
     const isNowBusy = Boolean(sessionStream.isBusy);
     const wasBusy = wasInspectorBusyRef.current;
+    const isPendingSpeech = pendingInspectorSpeechSessionRef.current === inspectorSessionId;
     wasInspectorBusyRef.current = isNowBusy;
 
-    if (isNowBusy || !wasBusy) {
+    if (isNowBusy || (!wasBusy && !isPendingSpeech)) {
       return;
     }
 
@@ -448,7 +452,16 @@ export function RadioShell() {
     }
 
     spokenOutputSignatureRef.current = speechSignature;
-    void speakTerminalOutput(voiceApiBase, speechText, speechAudioRef);
+    pendingInspectorSpeechSessionRef.current = null;
+    const speechRequestId = ++speechRequestSeqRef.current;
+    void speakTerminalOutput(
+      voiceApiBase,
+      speechText,
+      speechAudioRef,
+      setIsSpeakingOutput,
+      speechRequestSeqRef,
+      speechRequestId
+    );
   }, [inspectorSessionId, sessionStream, voiceApiBase]);
 
   useEffect(() => {
@@ -518,8 +531,8 @@ export function RadioShell() {
     };
   }, []);
 
-  async function handleHoldStart(pointerId: number) {
-    if (isBusy || isListening || inspectorSessionId) {
+  async function handleHoldStart(pointerId: number, options: { allowInspector?: boolean } = {}) {
+    if (isBusy || isListening || (inspectorSessionId && !options.allowInspector)) {
       return;
     }
 
@@ -581,6 +594,14 @@ export function RadioShell() {
       setIsPressingToRecord(false);
       setStatus("error");
       activePointerIdRef.current = null;
+      if (options.allowInspector && inspectorSessionId) {
+        setSessionStream((currentValue) => ({
+          ...(currentValue || {}),
+          error: "Microphone access failed. Allow microphone permission for this site and try again.",
+          sessionId: inspectorSessionId,
+          status: "error"
+        }));
+      }
     }
   }
 
@@ -670,6 +691,7 @@ export function RadioShell() {
     setIsLauncherOpen(false);
     wasInspectorBusyRef.current = false;
     spokenOutputSignatureRef.current = "";
+    pendingInspectorSpeechSessionRef.current = null;
   }
 
   function closeInspector() {
@@ -678,10 +700,17 @@ export function RadioShell() {
     setIsKeyboardOpen(false);
     setTerminalInput("");
     setIsSendingTerminalInput(false);
+    pendingInspectorSpeechSessionRef.current = null;
+    speechRequestSeqRef.current += 1;
+    stopTerminalSpeechPlayback(speechAudioRef, setIsSpeakingOutput);
   }
 
   async function uploadRecording(audioBlob: Blob, sessionId: string) {
     setStatus("processing");
+    if (inspectorSessionId === sessionId) {
+      pendingInspectorSpeechSessionRef.current = sessionId;
+      spokenOutputSignatureRef.current = "";
+    }
 
     try {
       let resolvedVoiceApiBase = voiceApiBase;
@@ -701,10 +730,6 @@ export function RadioShell() {
       const formData = new FormData();
       formData.append("audio", audioBlob, `radio-input.${getFileExtension(audioBlob.type)}`);
       formData.append("sessionId", sessionId);
-      formData.append(
-        "prompt",
-        "Short terminal command. Transcribe exactly what the speaker says. If the speaker says hello, return hello."
-      );
 
       const response = await fetch(`${resolvedVoiceApiBase}/voice`, {
         method: "POST",
@@ -718,9 +743,44 @@ export function RadioShell() {
       }
 
       applyVoicePayload(payload);
+      if (inspectorSessionId === sessionId) {
+        await refreshInspectorSessionOutput(resolvedVoiceApiBase, sessionId);
+      }
       setStatus("executed");
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Voice request failed.";
+      if (inspectorSessionId === sessionId) {
+        setSessionStream((currentValue) => ({
+          ...(currentValue || {}),
+          error: message,
+          sessionId,
+          status: "error"
+        }));
+      }
       setStatus("error");
+    }
+  }
+
+  async function refreshInspectorSessionOutput(apiBase: string, sessionId: string) {
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/output`, {
+        cache: "no-store"
+      });
+      const payload = await parseJsonResponse<SessionStreamResponse>(response);
+
+      if (!response.ok || payload?.status === "error") {
+        throw new Error(payload?.error || `Terminal refresh failed with ${response.status}.`);
+      }
+
+      setSessionStream(payload || null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to refresh terminal output.";
+      setSessionStream((currentValue) => ({
+        ...(currentValue || {}),
+        error: message,
+        sessionId,
+        status: "error"
+      }));
     }
   }
 
@@ -763,6 +823,8 @@ export function RadioShell() {
 
     const sessionId = inspectorSessionId as string;
     setIsSendingTerminalInput(true);
+    pendingInspectorSpeechSessionRef.current = sessionId;
+    spokenOutputSignatureRef.current = "";
 
     try {
       const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
@@ -800,6 +862,8 @@ export function RadioShell() {
 
     const sessionId = inspectorSessionId as string;
     setIsSendingTerminalInput(true);
+    pendingInspectorSpeechSessionRef.current = sessionId;
+    spokenOutputSignatureRef.current = "";
 
     try {
       const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
@@ -841,14 +905,7 @@ export function RadioShell() {
     pressTargetRef.current = inspectorSessionId;
     holdStartedRef.current = false;
     clearHoldTimer(holdTimerRef);
-    void getOrCreateStream(streamRef, streamRequestRef).catch(() => {
-      // The recorder path surfaces permission and device failures.
-    });
-    holdTimerRef.current = window.setTimeout(() => {
-      if (activePointerIdRef.current === pointerId) {
-        void handleHoldStart(pointerId);
-      }
-    }, HOLD_TO_RECORD_DELAY_MS);
+    void handleHoldStart(pointerId, { allowInspector: true });
   }
 
   function handleInspectorVoiceButtonEnd(target: HTMLElement, pointerId: number) {
@@ -1374,6 +1431,24 @@ export function RadioShell() {
           >
             <span>{isListening ? "Release" : isPressingToRecord ? "Hold..." : "Talk"}</span>
           </button>
+          <button
+            type="button"
+            className={`${styles.inspectorSpeechButton} ${isSpeakingOutput ? styles.inspectorSpeechButtonActive : ""}`}
+            aria-label="Cancel spoken terminal output"
+            onClick={() => {
+              stopTerminalSpeechPlayback(speechAudioRef, setIsSpeakingOutput);
+              speechRequestSeqRef.current += 1;
+              pendingInspectorSpeechSessionRef.current = null;
+              if (inspectorSessionId) {
+                const currentSpeechText = buildTerminalSpeechText(sessionStream?.output || "");
+                if (currentSpeechText) {
+                  spokenOutputSignatureRef.current = `${inspectorSessionId}:${currentSpeechText}`;
+                }
+              }
+            }}
+          >
+            <span>Cancel Voice</span>
+          </button>
         </div>
       ) : null}
 
@@ -1668,16 +1743,143 @@ function buildTerminalSpeechText(output: string) {
   const cleanedLines = output
     .split(/\r?\n/)
     .map((line) => line.trim())
-    .filter((line) => line && !/^working\b/i.test(line) && !/\besc to interrupt\b/i.test(line));
+    .filter((line) => line && !isTerminalSpeechNoiseLine(line));
 
-  return cleanedLines.slice(-10).join("\n").slice(-1200).trim();
+  let latestAssistantIndex = -1;
+  for (let index = cleanedLines.length - 1; index >= 0; index -= 1) {
+    if (isLikelyAssistantResponseLine(cleanedLines[index] || "")) {
+      latestAssistantIndex = index;
+      break;
+    }
+  }
+
+  if (latestAssistantIndex < 0) {
+    return "";
+  }
+
+  let startIndex = latestAssistantIndex;
+  while (startIndex > 0 && isAssistantContinuationLine(cleanedLines[startIndex - 1] || "")) {
+    startIndex -= 1;
+  }
+
+  let endIndex = latestAssistantIndex;
+  while (endIndex + 1 < cleanedLines.length && isAssistantContinuationLine(cleanedLines[endIndex + 1] || "")) {
+    endIndex += 1;
+  }
+
+  return cleanedLines
+    .slice(startIndex, endIndex + 1)
+    .filter((line) => isLikelyAssistantResponseLine(line) || isAssistantContinuationLine(line))
+    .join("\n")
+    .slice(-1200)
+    .trim();
+}
+
+function isTerminalSpeechNoiseLine(line: string) {
+  const normalized = line.trim().toLowerCase();
+
+  return (
+    !normalized ||
+    /^working\b/i.test(line) ||
+    /^[•·]\s*work/i.test(line) ||
+    /^[•·]\s*$/i.test(line) ||
+    /\besc to interrupt\b/i.test(line) ||
+    /^work(?:ing)?$/i.test(line) ||
+    /^boo(?:t(?:ing?)?)?\s*m?c?$/i.test(line) ||
+    /^(orking|rking|king|ing|ng|g)\d*$/i.test(line) ||
+    /^wor(?:k(?:i(?:ng?)?)?)?\d*$/i.test(line) ||
+    /^microsoft\s+windows\s+\[version/i.test(line) ||
+    /^\(c\)\s+microsoft\s+corporation/i.test(line) ||
+    /^windows\s+powershell/i.test(line) ||
+    /^copyright\s+\(c\)\s+microsoft/i.test(line) ||
+    /^install\s+the\s+latest\s+powershell/i.test(line) ||
+    /^[a-z]:\\.*>/i.test(line) ||
+    /^>\s*_?\s*openai codex/i.test(line) ||
+    /^model:\s+/i.test(line) ||
+    /^directory:\s+/i.test(line) ||
+    /^ps\s+[a-z]:\\/i.test(line) ||
+    /^gpt-[\w.-]+\s+(low|medium|high)\b/i.test(line) ||
+    /^\w[\w\s.-]+\s+gpt-[\w.-]+\s+(low|medium|high)\b/i.test(line) ||
+    /^summarize recent commits$/i.test(line) ||
+    /@filename\b/i.test(line) ||
+    /^improve documentation in @filename$/i.test(line) ||
+    /^tip:\s+/i.test(line) ||
+    /^\[features\]\.collab/i.test(line) ||
+    /^enable it with /i.test(line) ||
+    /^https:\/\/developers\.openai\.com/i.test(line) ||
+    /^heads up,/i.test(line) ||
+    normalized.includes("if the speaker says") ||
+    normalized.includes("return hello") ||
+    normalized.includes("transcribe exactly")
+  );
+}
+
+function isTerminalSpeechBoundaryLine(line: string) {
+  return (
+    /^codex$/i.test(line) ||
+    /^>\s*_?\s*openai codex/i.test(line) ||
+    /^model:\s+/i.test(line) ||
+    /^directory:\s+/i.test(line) ||
+    /^gpt-[\w.-]+\s+(low|medium|high)\b/i.test(line) ||
+    /^\w[\w\s.-]+\s+gpt-[\w.-]+\s+(low|medium|high)\b/i.test(line) ||
+    /^[a-z]:\\.*>/i.test(line)
+  );
+}
+
+function isLikelyUserEchoLine(line: string) {
+  const normalized = line.trim().toLowerCase();
+  return (
+    /^[›>]\s/.test(line) ||
+    /^(how are you|what\??|whyats the date|what'?s the date|summarize recent commits)$/i.test(line) ||
+    /@filename\b/i.test(line) ||
+    /^'.+' is not recognized as an internal or external command/i.test(line) ||
+    /^operable program or batch file\.?$/i.test(line) ||
+    normalized.length <= 2
+  );
+}
+
+function isLikelyAssistantResponseLine(line: string) {
+  const normalized = line.trim().toLowerCase();
+
+  if (isTerminalSpeechNoiseLine(line) || isTerminalSpeechBoundaryLine(line) || isLikelyUserEchoLine(line)) {
+    return false;
+  }
+
+  const content = line.replace(/^[•·]\s*/, "");
+  const minLength = content !== line ? 3 : 8;
+
+  return (
+    content.length >= minLength &&
+    /[a-z]/i.test(content) &&
+    !/^['"`]/.test(content) &&
+    (
+      /[.!?]$/.test(content) ||
+      /^(doing|ready|the|i|you|it|this|that|there|here|yes|no|sure|okay|ok)\b/i.test(content)
+    ) &&
+    !normalized.includes("not recognized as an internal or external command")
+  );
+}
+
+function isAssistantContinuationLine(line: string) {
+  if (isTerminalSpeechNoiseLine(line) || isTerminalSpeechBoundaryLine(line) || isLikelyUserEchoLine(line)) {
+    return false;
+  }
+
+  return line.length >= 4 && /[a-z]/i.test(line);
 }
 
 async function speakTerminalOutput(
   voiceApiBase: string,
   text: string,
-  speechAudioRef: MutableRefObject<HTMLAudioElement | null>
+  speechAudioRef: MutableRefObject<HTMLAudioElement | null>,
+  setIsSpeakingOutput: Dispatch<SetStateAction<boolean>>,
+  speechRequestSeqRef: MutableRefObject<number>,
+  speechRequestId: number
 ) {
+  if (speechRequestSeqRef.current !== speechRequestId) {
+    return;
+  }
+
   const response = await fetch(`${voiceApiBase}/tts`, {
     method: "POST",
     headers: {
@@ -1686,11 +1888,20 @@ async function speakTerminalOutput(
     body: JSON.stringify({ text })
   });
 
+  if (speechRequestSeqRef.current !== speechRequestId) {
+    return;
+  }
+
   if (!response.ok) {
     return;
   }
 
   const audioBlob = await response.blob();
+  if (speechRequestSeqRef.current !== speechRequestId) {
+    return;
+  }
+
+  setIsSpeakingOutput(true);
   const audioUrl = URL.createObjectURL(audioBlob);
   const previousAudio = speechAudioRef.current;
 
@@ -1706,10 +1917,36 @@ async function speakTerminalOutput(
     if (speechAudioRef.current === audio) {
       speechAudioRef.current = null;
     }
+    if (speechRequestSeqRef.current === speechRequestId) {
+      setIsSpeakingOutput(false);
+    }
   };
   await audio.play().catch(() => {
     URL.revokeObjectURL(audioUrl);
+    if (speechAudioRef.current === audio) {
+      speechAudioRef.current = null;
+    }
+    if (speechRequestSeqRef.current === speechRequestId) {
+      setIsSpeakingOutput(false);
+    }
   });
+}
+
+function stopTerminalSpeechPlayback(
+  speechAudioRef: MutableRefObject<HTMLAudioElement | null>,
+  setIsSpeakingOutput: Dispatch<SetStateAction<boolean>>
+) {
+  const activeAudio = speechAudioRef.current;
+  if (activeAudio) {
+    activeAudio.pause();
+    activeAudio.currentTime = 0;
+    if (activeAudio.src) {
+      URL.revokeObjectURL(activeAudio.src);
+    }
+    speechAudioRef.current = null;
+  }
+
+  setIsSpeakingOutput(false);
 }
 
 function getSupportedMimeType() {

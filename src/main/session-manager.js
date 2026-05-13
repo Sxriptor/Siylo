@@ -445,6 +445,15 @@ function isCodexNoiseLine(value) {
   return (
     isCodexCliStatusLine(normalized) ||
     /^explain this codebase$/.test(normalized) ||
+    /^improve documentation in @filename$/.test(normalized) ||
+    /^if the speaker says\b/.test(normalized) ||
+    /\breturn hello\b/.test(normalized) ||
+    /\btranscribe exactly\b/.test(normalized) ||
+    /^tip:\s+/i.test(normalized) ||
+    /^\[features\]\.collab/i.test(normalized) ||
+    /^enable it with /i.test(normalized) ||
+    /^https:\/\/developers\.openai\.com/i.test(normalized) ||
+    /^heads up,/i.test(normalized) ||
     /^token usage:\s+total=/i.test(normalized) ||
     /^to continue this session,\s+run codex resume /i.test(normalized)
   );

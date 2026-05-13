@@ -49,7 +49,9 @@ async function executeVoiceCommand({ requestedSessionId, transcript }) {
 
     if (step.type === "send") {
       const hintedTarget = resolveHintedTarget(step.target, openedTargets, activeSessionId);
-      const result = await sendTextToTarget(hintedTarget, step.text);
+      const result = await sendTextToTarget(hintedTarget, step.text, {
+        allowBusy: Boolean(requestedSessionId)
+      });
       activeSessionId = result.sessionId;
       output = result.output || output;
       steps.push(`send:${result.sessionId}`);
@@ -196,12 +198,14 @@ function parseVoicePlan(transcript, requestedSessionId) {
   return [{ type: "send", target: inferredTarget, text: stripLeadingVerb(transcript) }];
 }
 
-async function sendTextToTarget(target, text) {
+async function sendTextToTarget(target, text, options = {}) {
   const resolvedTarget = await resolveTarget(target);
   const nextText = normalizeTargetText(resolvedTarget, text);
 
   if (hasManagedSession(resolvedTarget)) {
-    await sendTextToSession(resolvedTarget, nextText);
+    await sendTextToSession(resolvedTarget, nextText, {
+      allowBusy: Boolean(options.allowBusy)
+    });
     await delay(600);
     return {
       output: drainPendingOutput(resolvedTarget),
