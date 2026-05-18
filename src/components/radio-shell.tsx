@@ -82,6 +82,8 @@ export function RadioShell() {
   const streamRef = useRef<MediaStream | null>(null);
   const streamRequestRef = useRef<Promise<MediaStream> | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const inspectorTalkButtonRef = useRef<HTMLButtonElement | null>(null);
+  const mainHoldAreaRef = useRef<HTMLElement | null>(null);
   const viewerWindowRef = useRef<HTMLDivElement | null>(null);
   const chunksRef = useRef<Blob[]>([]);
   const activePointerIdRef = useRef<number | null>(null);
@@ -531,6 +533,54 @@ export function RadioShell() {
     };
   }, []);
 
+  // iOS Safari only shows the mic permission dialog when getUserMedia is called
+  // directly from a native touchstart handler. React synthetic events are attached
+  // at the document root and don't satisfy iOS's user-gesture requirement.
+  useEffect(() => {
+    const button = inspectorTalkButtonRef.current;
+    if (!button) return;
+
+    function onTouchStart(event: TouchEvent) {
+      event.preventDefault();
+      if (streamRef.current?.active || streamRequestRef.current) return;
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      streamRequestRef.current = navigator.mediaDevices
+        .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+        .then((stream) => {
+          streamRef.current = stream;
+          return stream;
+        })
+        .finally(() => {
+          streamRequestRef.current = null;
+        });
+    }
+
+    button.addEventListener("touchstart", onTouchStart, { passive: false });
+    return () => button.removeEventListener("touchstart", onTouchStart);
+  }, [inspectorSessionId]);
+
+  useEffect(() => {
+    const area = mainHoldAreaRef.current;
+    if (!area) return;
+
+    function onTouchStart() {
+      if (streamRef.current?.active || streamRequestRef.current) return;
+      if (!navigator.mediaDevices?.getUserMedia) return;
+      streamRequestRef.current = navigator.mediaDevices
+        .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
+        .then((stream) => {
+          streamRef.current = stream;
+          return stream;
+        })
+        .finally(() => {
+          streamRequestRef.current = null;
+        });
+    }
+
+    area.addEventListener("touchstart", onTouchStart, { passive: true });
+    return () => area.removeEventListener("touchstart", onTouchStart);
+  }, []);
+
   async function handleHoldStart(pointerId: number, options: { allowInspector?: boolean } = {}) {
     if (isBusy || isListening || (inspectorSessionId && !options.allowInspector)) {
       return;
@@ -597,7 +647,7 @@ export function RadioShell() {
       if (options.allowInspector && inspectorSessionId) {
         setSessionStream((currentValue) => ({
           ...(currentValue || {}),
-          error: "Microphone access failed. Allow microphone permission for this site and try again.",
+          error: "Microphone access failed. On iPhone/iPad: Settings → Safari → Microphone → Allow. On Android: tap the lock icon in your browser address bar and allow microphone.",
           sessionId: inspectorSessionId,
           status: "error"
         }));
@@ -709,7 +759,6 @@ export function RadioShell() {
     setStatus("processing");
     if (inspectorSessionId === sessionId) {
       pendingInspectorSpeechSessionRef.current = sessionId;
-      spokenOutputSignatureRef.current = "";
     }
 
     try {
@@ -824,7 +873,6 @@ export function RadioShell() {
     const sessionId = inspectorSessionId as string;
     setIsSendingTerminalInput(true);
     pendingInspectorSpeechSessionRef.current = sessionId;
-    spokenOutputSignatureRef.current = "";
 
     try {
       const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
@@ -863,7 +911,6 @@ export function RadioShell() {
     const sessionId = inspectorSessionId as string;
     setIsSendingTerminalInput(true);
     pendingInspectorSpeechSessionRef.current = sessionId;
-    spokenOutputSignatureRef.current = "";
 
     try {
       const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
@@ -905,6 +952,7 @@ export function RadioShell() {
     pressTargetRef.current = inspectorSessionId;
     holdStartedRef.current = false;
     clearHoldTimer(holdTimerRef);
+    void getOrCreateStream(streamRef, streamRequestRef).catch(() => {});
     void handleHoldStart(pointerId, { allowInspector: true });
   }
 
@@ -1139,6 +1187,7 @@ export function RadioShell() {
 
   return (
     <main
+      ref={mainHoldAreaRef}
       className={`${styles.page} ${isListening ? styles.listening : ""}`}
       onPointerDown={(event) => {
         if (activeView !== "sessions") {
@@ -1406,6 +1455,7 @@ export function RadioShell() {
             ) : null}
           </section>
           <button
+            ref={inspectorTalkButtonRef}
             type="button"
             className={`${styles.inspectorTalkButton} ${isListening || isPressingToRecord ? styles.inspectorTalkButtonActive : ""}`}
             aria-label="Hold to speak to this terminal"
