@@ -64,6 +64,7 @@ async function createManagedSession(shell, options = {}) {
     pendingOutput: "",
     recentOutput: "",
     isBusy: false,
+    lastOutputAt: 0,
     closed: false
   });
 
@@ -76,6 +77,7 @@ async function createManagedSession(shell, options = {}) {
     const cleaned = stripAnsi(data);
     runtime.pendingOutput = `${runtime.pendingOutput}${cleaned}`.slice(-24000);
     runtime.recentOutput = `${runtime.recentOutput}${cleaned}`.slice(-4000);
+    runtime.lastOutputAt = Date.now();
     runtime.isBusy = detectBusyState(runtime.recentOutput);
 
     if (!runtime.isBusy && hasInteractivePrompt(runtime.recentOutput)) {
@@ -212,10 +214,11 @@ function getManagedSessionSnapshot(sessionId, maxLength = 6000) {
   }
 
   const output = compactTerminalOutput(runtime.recentOutput || runtime.pendingOutput || "").slice(-maxLength).trim();
+  const quietMs = runtime.lastOutputAt > 0 ? Date.now() - runtime.lastOutputAt : Infinity;
 
   return {
     sessionId,
-    isBusy: runtime.isBusy,
+    isBusy: runtime.isBusy || quietMs < 600,
     output
   };
 }
@@ -430,6 +433,12 @@ function detectBusyState(value) {
   const tail = compact.slice(-1600);
 
   if (hasInteractivePrompt(tail) || hasCompletionFooter(tail)) {
+    return false;
+  }
+
+  // Codex TUI: › prompt after the last "esc to interrupt" means session returned to idle
+  const lastEscIdx = tail.lastIndexOf("esc to interrupt");
+  if (lastEscIdx >= 0 && /(?:^|\n)\s*[›»❯]/.test(tail.slice(lastEscIdx))) {
     return false;
   }
 
