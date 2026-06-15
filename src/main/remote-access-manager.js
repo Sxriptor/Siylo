@@ -5,12 +5,17 @@ const {
   stopCloudflaredTunnel
 } = require("./cloudflared-service");
 const {
+  isRemoteAccessServerListening,
   restartRemoteAccessServer,
   startRemoteAccessServer,
   stopRemoteAccessServer
 } = require("./remote-access-server");
 
 let currentOptions = null;
+let lastRestartAt = 0;
+let healthCheckId = null;
+const restartCooldownMs = 30000;
+const healthCheckIntervalMs = 5000;
 
 async function startRemoteAccess(options = {}) {
   currentOptions = {
@@ -44,7 +49,19 @@ async function startRemoteAccess(options = {}) {
 
   try {
     await startCloudflaredTunnel({
-      tunnelName: "siylo-radio"
+      tunnelName: "siylo-radio",
+      onExit: () => {
+        const now = Date.now();
+        if (now - lastRestartAt < restartCooldownMs) {
+          appendLog("warn", "Cloudflared exited but restart is on cooldown, skipping.");
+          return;
+        }
+        lastRestartAt = now;
+        appendLog("warn", "Cloudflared tunnel exited unexpectedly, restarting remote access...");
+        restartRemoteAccess(currentOptions).catch((error) => {
+          appendLog("error", `Remote access auto-restart failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     });
   } catch (error) {
     await stopRemoteAccessServer().catch(() => {});
@@ -60,10 +77,30 @@ async function startRemoteAccess(options = {}) {
     lastError: ""
   });
   appendLog("info", "Remote access agent started.");
+
+  if (!healthCheckId) {
+    healthCheckId = setInterval(() => {
+      if (!isCloudflaredTunnelRunning()) {
+        return;
+      }
+      if (!isRemoteAccessServerListening()) {
+        appendLog("warn", "Remote access server went down while tunnel is running, restarting server...");
+        startRemoteAccessServer(currentOptions).catch((error) => {
+          appendLog("error", `Server self-heal failed: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
+    }, healthCheckIntervalMs);
+  }
+
   return requireState();
 }
 
 async function stopRemoteAccess() {
+  if (healthCheckId) {
+    clearInterval(healthCheckId);
+    healthCheckId = null;
+  }
+
   await stopCloudflaredTunnel().catch((error) => {
     appendLog("warn", `Failed to stop cloudflared tunnel: ${error instanceof Error ? error.message : String(error)}`);
   });

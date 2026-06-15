@@ -21,7 +21,7 @@ const electronBin = path.resolve(
 const children = [];
 let shuttingDown = false;
 
-function run(command, args, extraEnv = {}) {
+function run(command, args, extraEnv = {}, { critical = true } = {}) {
   const child = spawn(command, args, {
     stdio: "inherit",
     cwd: process.cwd(),
@@ -33,11 +33,13 @@ function run(command, args, extraEnv = {}) {
   });
 
   children.push(child);
-  child.on("exit", (code) => {
-    if (!shuttingDown && code && code !== 0) {
-      shutdown(code);
-    }
-  });
+  if (critical) {
+    child.on("exit", (code) => {
+      if (!shuttingDown && code && code !== 0) {
+        shutdown(code);
+      }
+    });
+  }
 
   return child;
 }
@@ -91,16 +93,49 @@ process.on("SIGTERM", () => shutdown(0));
 
 run(nextBin, ["dev", "--hostname", rendererHost, "--port", "3000"], {
   SIYLO_VOICE_HOST: process.env.SIYLO_VOICE_HOST || "0.0.0.0"
-});
+}, { critical: false });
+
+let electronRestarts = 0;
+const maxElectronRestarts = 10;
+
+function spawnElectron() {
+  const electron = spawn(electronBin, ["."], {
+    stdio: "inherit",
+    cwd: process.cwd(),
+    shell: process.platform === "win32",
+    env: {
+      ...process.env,
+      NODE_ENV: "development",
+      SIYLO_RENDERER_URL: rendererUrl
+    }
+  });
+
+  children.push(electron);
+
+  electron.on("exit", (code, signal) => {
+    if (shuttingDown) return;
+
+    // User pressed Ctrl+C or clean quit from tray — stop everything
+    if (signal === "SIGINT" || code === 0) {
+      shutdown(0);
+      return;
+    }
+
+    // Non-zero exit = crash — restart Electron
+    if (++electronRestarts > maxElectronRestarts) {
+      console.error(`[dev] Electron crashed ${electronRestarts} times, giving up.`);
+      shutdown(1);
+      return;
+    }
+
+    console.log(`[dev] Electron exited (code=${code}), restarting in 2s... (${electronRestarts}/${maxElectronRestarts})`);
+    setTimeout(spawnElectron, 2000);
+  });
+}
 
 try {
   await waitForPort(3000);
-  const electron = run(electronBin, ["."], {
-    NODE_ENV: "development",
-    SIYLO_RENDERER_URL: rendererUrl
-  });
-
-  electron.on("exit", () => shutdown(0));
+  spawnElectron();
 } catch (error) {
   console.error(error instanceof Error ? error.message : error);
   shutdown(1);

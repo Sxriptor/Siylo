@@ -92,11 +92,15 @@ async function createManagedSession(shell, options = {}) {
     appendLog("info", `Managed session exited: ${sessionId} (code ${exitCode}).`);
 
     if (typeof onSessionExit === "function") {
-      onSessionExit({
-        sessionId,
-        exitCode,
-        pendingOutput: runtime ? runtime.pendingOutput : ""
-      });
+      Promise.resolve()
+        .then(() => onSessionExit({
+          sessionId,
+          exitCode,
+          pendingOutput: runtime ? runtime.pendingOutput : ""
+        }))
+        .catch((error) => {
+          appendLog("warn", `Session exit handler failed for ${sessionId}: ${formatError(error)}`);
+        });
     }
   });
 

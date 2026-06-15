@@ -39,10 +39,21 @@ async function startRemoteAccessServer(options = {}) {
     });
 
     remoteAccessServer = http.createServer((request, response) => {
+      if (request.headers.upgrade) {
+        sendText(response, 426, "Upgrade Required", { Connection: "close" });
+        return;
+      }
       handleRemoteAccessRequest(request, response).catch((error) => {
         appendLog("error", `Remote access request failed: ${formatError(error)}`);
-        sendText(response, 500, "Remote access request failed.");
+        if (!response.headersSent && !response.destroyed) {
+          sendText(response, 500, "Remote access request failed.");
+        }
       });
+    });
+
+    remoteAccessServer.on("upgrade", (request, socket) => {
+      socket.write("HTTP/1.1 426 Upgrade Required\r\nConnection: close\r\n\r\n");
+      socket.destroy();
     });
 
     await new Promise((resolve, reject) => {
@@ -61,6 +72,9 @@ async function startRemoteAccessServer(options = {}) {
       remoteAccessServer.once("error", onError);
       remoteAccessServer.listen(port, "127.0.0.1", () => {
         remoteAccessServer.off("error", onError);
+        remoteAccessServer.on("error", (error) => {
+          appendLog("error", `Remote access server error: ${formatError(error)}`);
+        });
         resolve();
       });
     });
@@ -440,7 +454,12 @@ function formatError(error) {
   return String(error);
 }
 
+function isRemoteAccessServerListening() {
+  return remoteAccessServer !== null && remoteAccessServer.listening;
+}
+
 module.exports = {
+  isRemoteAccessServerListening,
   restartRemoteAccessServer,
   startRemoteAccessServer,
   stopRemoteAccessServer

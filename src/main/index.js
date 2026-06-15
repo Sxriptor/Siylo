@@ -37,6 +37,18 @@ const {
   stopRemoteAccess
 } = require("./remote-access-manager");
 
+process.on("uncaughtException", (error) => {
+  try {
+    appendLog("error", `Uncaught exception: ${error instanceof Error ? error.message : String(error)}`);
+  } catch {}
+});
+
+process.on("unhandledRejection", (reason) => {
+  try {
+    appendLog("error", `Unhandled rejection: ${reason instanceof Error ? reason.message : String(reason)}`);
+  } catch {}
+});
+
 const isDev = process.env.NODE_ENV === "development";
 const rendererUrl = process.env.SIYLO_RENDERER_URL || "http://127.0.0.1:3000";
 const assetsPath = path.join(app.getAppPath(), "public");
@@ -326,6 +338,18 @@ app.whenReady().then(() => {
       broadcastState();
     });
   }
+
+  startRemoteAccess({
+    isDev,
+    rendererUrl,
+    productionRoot: productionRootPath,
+    publicRoot: assetsPath
+  }).then(() => {
+    broadcastState();
+  }).catch((error) => {
+    appendLog("error", `Remote access auto-start failed: ${error instanceof Error ? error.message : String(error)}`);
+    broadcastState();
+  });
 
   if (app.isPackaged) {
     setTimeout(() => {

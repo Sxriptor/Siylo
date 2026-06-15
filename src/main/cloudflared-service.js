@@ -22,6 +22,7 @@ async function startCloudflaredTunnel(options = {}) {
   }
 
   tunnelName = String(options.tunnelName || defaultTunnelName).trim() || defaultTunnelName;
+  const onExit = typeof options.onExit === "function" ? options.onExit : null;
   const executablePath = resolveCloudflaredExecutable();
 
   const pid = await spawnCloudflaredTerminal(executablePath, tunnelName);
@@ -50,6 +51,9 @@ async function startCloudflaredTunnel(options = {}) {
           lastError: "Cloudflared tunnel terminal exited."
         });
         appendLog("info", `Cloudflared tunnel terminal exited (PID ${pid}).`);
+        if (onExit) {
+          onExit();
+        }
       })
       .catch(() => {});
   }, 3000);
