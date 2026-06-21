@@ -1457,11 +1457,9 @@ export function RadioShell() {
           <section className={styles.inspectorPanel}>
             <header className={styles.inspectorHeader}>
               <div>
-                <p className={styles.inspectorEyebrow}>Live Stdout</p>
                 <h2 className={styles.inspectorTitle}>{formatSessionLabel(inspectorSessionId)}</h2>
               </div>
               <div className={styles.inspectorControls}>
-                <span className={styles.inspectorStatus}>{inspectorStatusLabel}</span>
                 <button
                   type="button"
                   className={styles.iconButton}
@@ -1488,14 +1486,11 @@ export function RadioShell() {
 
             <pre className={styles.outputPanel}>
               {sessionStream?.outputAvailable === false
-                ? sessionStream.message || sessionStream.error || "Live stdout is not available for this session."
+                ? sessionStream.message || sessionStream.error || "Stdout is not available for this session."
                 : sessionStream?.output || "Waiting for terminal output..."}
             </pre>
 
             {sessionStream?.error ? <p className={styles.inspectorMessage}>{sessionStream.error}</p> : null}
-            <p className={styles.inspectorHint}>
-              Use the floating Talk button to speak to this terminal. Output speaks once through the current audio device after it stops working; use headphones to avoid feedback.
-            </p>
 
             {isKeyboardOpen ? (
               <form
@@ -1549,6 +1544,9 @@ export function RadioShell() {
                 </div>
               </form>
             ) : null}
+            <div className={styles.terminalCursorRow} aria-hidden="true">
+              <span className={styles.terminalCursor}>_</span>
+            </div>
           </section>
           <button
             ref={inspectorTalkButtonRef}
