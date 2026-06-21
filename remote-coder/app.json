@@ -26,7 +26,10 @@
             "deploymentTarget": "16.4"
           }
         }
-      ]
+      ],
+      "expo-audio",
+      "expo-video",
+      "expo-status-bar"
     ],
     "jsEngine": "jsc",
     "extra": {

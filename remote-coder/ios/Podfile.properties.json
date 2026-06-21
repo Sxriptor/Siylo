@@ -1,9 +1,10 @@
 {
-  "expo.jsEngine": "jsc",
+  "expo.jsEngine": "hermes",
   "EX_DEV_CLIENT_NETWORK_INSPECTOR": "true",
   "expo.inlineModules.watchedDirectories": "[]",
   "expo.inlineModules.xcodeProjectTargets": "{\"mainTarget\":\"RemoteCoder\",\"targets\":[]}",
   "ios.deploymentTarget": "16.4",
   "ios.forceStaticLinking": "[]",
-  "apple.privacyManifestAggregationEnabled": "true"
+  "apple.privacyManifestAggregationEnabled": "true",
+  "EXPO_USE_PRECOMPILED_MODULES": "true"
 }

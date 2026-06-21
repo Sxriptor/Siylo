@@ -1,4 +1,10 @@
-import { Audio } from "expo-av";
+import {
+  RecordingPresets,
+  requestRecordingPermissionsAsync,
+  setAudioModeAsync,
+  useAudioRecorder,
+  type AudioRecorder
+} from "expo-audio";
 import * as Speech from "expo-speech";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -193,7 +199,8 @@ function App() {
   const [healthState, setHealthState] = useState("Connecting");
   const [isSendingInput, setIsSendingInput] = useState(false);
 
-  const recordingRef = useRef<Audio.Recording | null>(null);
+  const audioRecorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
+  const recordingRef = useRef<AudioRecorder | null>(null);
   const isRecordingRef = useRef(false);
   const viewerThrottleRef = useRef(0);
   const lastSpokenSignatureRef = useRef("");
@@ -387,7 +394,7 @@ function App() {
   }
 
   async function ensureRecordingPermissions() {
-    const permission = await Audio.requestPermissionsAsync();
+    const permission = await requestRecordingPermissionsAsync();
     if (!permission.granted) {
       throw new Error("Microphone access is required.");
     }
@@ -401,13 +408,14 @@ function App() {
     try {
       setErrorMessage("");
       await ensureRecordingPermissions();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: true,
-        playsInSilentModeIOS: true
+      await setAudioModeAsync({
+        allowsRecording: true,
+        playsInSilentMode: true
       });
 
-      const { recording } = await Audio.Recording.createAsync(Audio.RecordingOptionsPresets.HIGH_QUALITY);
-      recordingRef.current = recording;
+      await audioRecorder.prepareToRecordAsync();
+      audioRecorder.record();
+      recordingRef.current = audioRecorder;
       isRecordingRef.current = true;
       setStatus("listening");
     } catch (error) {
@@ -425,13 +433,13 @@ function App() {
 
     try {
       const recording = recordingRef.current;
-      await recording.stopAndUnloadAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true
+      await recording.stop();
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true
       });
 
-      const uri = recording.getURI();
+      const uri = recording.uri;
       recordingRef.current = null;
       isRecordingRef.current = false;
 
