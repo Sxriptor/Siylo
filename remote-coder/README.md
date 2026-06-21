@@ -51,5 +51,5 @@ eas build --profile development --platform ios
 ## Notes
 
 - `react-native-volume-manager` requires a custom dev build; Expo Go is not enough.
-- The package currently expects iOS 15.1+.
+- The package currently expects iOS 16.4+.
 - Hardware volume behavior must be tested on a physical device.

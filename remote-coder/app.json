@@ -23,11 +23,12 @@
         "expo-build-properties",
         {
           "ios": {
-            "deploymentTarget": "15.1"
+            "deploymentTarget": "16.4"
           }
         }
       ]
     ],
+    "jsEngine": "jsc",
     "extra": {
       "eas": {
         "projectId": "79be1fcc-0d46-4aca-bd9a-026354a0cad3"
