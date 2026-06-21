@@ -1,0 +1,37 @@
+{
+  "expo": {
+    "name": "Remote Coder",
+    "slug": "remote-coder",
+    "scheme": "remotecoder",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": false,
+      "bundleIdentifier": "com.sxriptor.remotecoder",
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "Remote Coder records your voice so it can send commands to your Siylo desktop agent.",
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "com.sxriptor.remotecoder"
+    },
+    "plugins": [
+      "expo-dev-client",
+      [
+        "expo-build-properties",
+        {
+          "ios": {
+            "deploymentTarget": "15.1"
+          }
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "79be1fcc-0d46-4aca-bd9a-026354a0cad3"
+      }
+    }
+  }
+}
