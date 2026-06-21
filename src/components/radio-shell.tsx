@@ -73,6 +73,7 @@ export function RadioShell() {
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
   const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
   const [speechVolume, setSpeechVolume] = useState(1);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
   const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
   const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
@@ -510,6 +511,64 @@ export function RadioShell() {
       terminalInputRef.current?.focus();
     }
   }, [isKeyboardOpen]);
+
+  useEffect(() => {
+    const nativePointerId = 989001;
+
+    function switchToNextSession() {
+      if (recorderRef.current?.state === "recording" || holdStartedRef.current || activePointerIdRef.current === nativePointerId) {
+        return;
+      }
+
+      const availableSessionIds = sessionIdsRef.current.filter(Boolean);
+      if (availableSessionIds.length <= 1) {
+        return;
+      }
+
+      const activeSessionId = inspectorSessionId || activeSessionIdRef.current;
+      const activeIndex = Math.max(availableSessionIds.indexOf(activeSessionId), 0);
+      const nextSessionId = availableSessionIds[(activeIndex + 1) % availableSessionIds.length] || availableSessionIds[0];
+
+      if (!nextSessionId) {
+        return;
+      }
+
+      setCurrentSessionId(nextSessionId);
+      activeSessionIdRef.current = nextSessionId;
+
+      if (inspectorSessionId) {
+        openInspector(nextSessionId);
+      }
+    }
+
+    function toggleNativeHold() {
+      if (recorderRef.current?.state === "recording" || holdStartedRef.current || activePointerIdRef.current === nativePointerId) {
+        handleHoldEnd(nativePointerId);
+        return;
+      }
+
+      setIsPressingToRecord(true);
+      pressTargetRef.current = inspectorSessionId || activeSessionIdRef.current;
+      void handleHoldStart(nativePointerId, { allowInspector: Boolean(inspectorSessionId) });
+    }
+
+    window.__siyloNativeVolumeAction = (action) => {
+      if (action === "volume-up") {
+        toggleNativeHold();
+        return;
+      }
+
+      if (action === "volume-down") {
+        switchToNextSession();
+      }
+    };
+
+    return () => {
+      if (window.__siyloNativeVolumeAction) {
+        delete window.__siyloNativeVolumeAction;
+      }
+    };
+  }, [inspectorSessionId]);
 
   useEffect(() => {
     const viewerWindow = viewerWindowRef.current;
@@ -1253,6 +1312,22 @@ export function RadioShell() {
       }}
       onContextMenu={(event) => event.preventDefault()}
     >
+      <button
+        type="button"
+        className={styles.settingsButton}
+        aria-label="Open radio settings"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          setIsSettingsOpen(true);
+        }}
+      >
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" aria-hidden="true">
+          <circle cx="12" cy="12" r="3.2" />
+          <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.04.04a2.05 2.05 0 0 1-2.9 2.9l-.04-.04a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V21a2.05 2.05 0 0 1-4.1 0v-.06A1.7 1.7 0 0 0 8.92 19.4a1.7 1.7 0 0 0-1.88.34l-.04.04a2.05 2.05 0 0 1-2.9-2.9l.04-.04A1.7 1.7 0 0 0 4.48 15a1.7 1.7 0 0 0-1.56-1.02H2.86a2.05 2.05 0 0 1 0-4.1h.06a1.7 1.7 0 0 0 1.56-1.02 1.7 1.7 0 0 0-.34-1.88l-.04-.04a2.05 2.05 0 0 1 2.9-2.9l.04.04a1.7 1.7 0 0 0 1.88.34h.01A1.7 1.7 0 0 0 9.94 2.9V2.84a2.05 2.05 0 0 1 4.1 0v.06a1.7 1.7 0 0 0 1.02 1.56 1.7 1.7 0 0 0 1.88-.34l.04-.04a2.05 2.05 0 0 1 2.9 2.9l-.04.04a1.7 1.7 0 0 0-.34 1.88v.01a1.7 1.7 0 0 0 1.56 1.02h.06a2.05 2.05 0 0 1 0 4.1h-.06A1.7 1.7 0 0 0 19.4 15Z" />
+        </svg>
+      </button>
+
       {activeView === "sessions" ? (
         <div className={styles.sessionContainer}>
           {sessionSlots.map((slot) =>
@@ -1520,17 +1595,35 @@ export function RadioShell() {
           >
             <span>Cancel Voice</span>
           </button>
-          <label className={styles.inspectorVolumeControl}>
-            <span>Voice {Math.round(speechVolume * 100)}%</span>
-            <input
-              type="range"
-              min="0"
-              max="1"
-              step="0.05"
-              value={speechVolume}
-              onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
-            />
-          </label>
+        </div>
+      ) : null}
+
+      {isSettingsOpen ? (
+        <div className={styles.settingsShell}>
+          <div className={styles.settingsBackdrop} onClick={() => setIsSettingsOpen(false)} aria-hidden="true" />
+          <section className={styles.settingsPanel}>
+            <header className={styles.settingsHeader}>
+              <div>
+                <p className={styles.settingsEyebrow}>Settings</p>
+                <h2 className={styles.settingsTitle}>Radio</h2>
+              </div>
+              <button type="button" className={styles.closeButton} onClick={() => setIsSettingsOpen(false)}>
+                Close
+              </button>
+            </header>
+            <label className={styles.settingsRange}>
+              <span>Voice output</span>
+              <strong>{Math.round(speechVolume * 100)}%</strong>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={speechVolume}
+                onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
+              />
+            </label>
+          </section>
         </div>
       ) : null}
 

@@ -29,6 +29,28 @@
   z-index: 1;
 }
 
+.settingsButton {
+  position: absolute;
+  top: max(14px, env(safe-area-inset-top));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 9;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(8, 12, 20, 0.86);
+  color: rgba(244, 247, 251, 0.86);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.3);
+  backdrop-filter: blur(16px);
+}
+
+.settingsButton svg {
+  width: 21px;
+  height: 21px;
+}
+
 .viewerDock {
   position: absolute;
   top: 18px;
@@ -403,31 +425,6 @@
   color: #08101b;
 }
 
-.inspectorVolumeControl {
-  position: absolute;
-  right: max(18px, env(safe-area-inset-right));
-  top: calc(50% + 98px);
-  z-index: 12;
-  display: grid;
-  width: 78px;
-  gap: 5px;
-  padding: 8px 7px;
-  border-radius: 18px;
-  background: rgba(8, 16, 27, 0.92);
-  color: rgba(244, 247, 251, 0.88);
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.26);
-  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
-  font-size: 0.62rem;
-  font-weight: 800;
-  line-height: 1.15;
-  text-align: center;
-}
-
-.inspectorVolumeControl input {
-  width: 100%;
-  accent-color: #f4f7fb;
-}
-
 .inspectorTalkButtonActive {
   background: linear-gradient(145deg, #ff7a7a, #d83c3c);
   color: #ffffff;
@@ -525,6 +522,75 @@
   color: #08101b;
 }
 
+.settingsShell {
+  position: absolute;
+  inset: 0;
+  z-index: 14;
+}
+
+.settingsBackdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(2, 5, 10, 0.72);
+}
+
+.settingsPanel {
+  position: absolute;
+  top: max(64px, calc(env(safe-area-inset-top) + 54px));
+  right: max(14px, env(safe-area-inset-right));
+  display: grid;
+  gap: 18px;
+  width: min(88vw, 340px);
+  padding: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 22px;
+  background: rgba(8, 12, 20, 0.96);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(18px);
+}
+
+.settingsHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settingsEyebrow {
+  margin: 0;
+  color: rgba(244, 247, 251, 0.68);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.settingsTitle {
+  margin: 6px 0 0;
+  font-size: 1.35rem;
+  line-height: 1.1;
+}
+
+.settingsRange {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  color: rgba(244, 247, 251, 0.88);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-weight: 800;
+}
+
+.settingsRange strong {
+  color: #f4f7fb;
+}
+
+.settingsRange input {
+  grid-column: 1 / -1;
+  width: 100%;
+  accent-color: #f4f7fb;
+}
+
 @media (max-width: 640px) {
   .sessionContainer {
     width: min(92vw, 360px);
@@ -554,12 +620,6 @@
     right: 15px;
     top: calc(50% + 48px);
     width: 64px;
-  }
-
-  .inspectorVolumeControl {
-    right: 8px;
-    top: calc(50% + 88px);
-    width: 78px;
   }
 
   .keyboardActions {

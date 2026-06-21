@@ -23,6 +23,7 @@ const WEB_REMOTE_BRIDGE = `
 
   window.__siyloNativeBridgeInstalled = true;
   window.__siyloNativePointerId = 989001;
+  window.__siyloNativeFallbackHolding = false;
 
   function getTarget() {
     return document.querySelector("main") || document.body || document.documentElement;
@@ -68,6 +69,15 @@ const WEB_REMOTE_BRIDGE = `
     }
   };
 
+  window.__siyloNativeFallbackVolumeAction = function (action) {
+    if (action !== "volume-up") {
+      return;
+    }
+
+    window.__siyloNativeFallbackHolding = !window.__siyloNativeFallbackHolding;
+    window.__siyloNativePressToTalk(window.__siyloNativeFallbackHolding ? "start" : "stop");
+  };
+
   true;
 })();
 `;
@@ -76,7 +86,6 @@ function App() {
   const webViewRef = useRef<WebView>(null);
   const lastVolumeRef = useRef(VOLUME_BASELINE);
   const resettingVolumeRef = useRef(false);
-  const isHoldingRef = useRef(false);
   const [currentUrl, setCurrentUrl] = useState(RADIO_URL);
 
   useEffect(() => {
@@ -108,13 +117,13 @@ function App() {
           lastVolumeRef.current = volume;
 
           if (delta >= VOLUME_STEP_THRESHOLD) {
-            startWebHold();
+            sendVolumeAction("volume-up");
             void resetHardwareVolume();
             return;
           }
 
           if (delta <= -VOLUME_STEP_THRESHOLD) {
-            stopWebHold();
+            sendVolumeAction("volume-down");
             void resetHardwareVolume();
           }
         });
@@ -146,26 +155,13 @@ function App() {
     }
   }
 
-  function startWebHold() {
-    if (isHoldingRef.current) {
-      return;
-    }
-
-    isHoldingRef.current = true;
+  function sendVolumeAction(action: "volume-up" | "volume-down") {
     webViewRef.current?.injectJavaScript(`
-      window.__siyloNativePressToTalk && window.__siyloNativePressToTalk("start");
-      true;
-    `);
-  }
-
-  function stopWebHold() {
-    if (!isHoldingRef.current) {
-      return;
-    }
-
-    isHoldingRef.current = false;
-    webViewRef.current?.injectJavaScript(`
-      window.__siyloNativePressToTalk && window.__siyloNativePressToTalk("stop");
+      if (window.__siyloNativeVolumeAction) {
+        window.__siyloNativeVolumeAction(${JSON.stringify(action)});
+      } else if (window.__siyloNativeFallbackVolumeAction) {
+        window.__siyloNativeFallbackVolumeAction(${JSON.stringify(action)});
+      }
       true;
     `);
   }
