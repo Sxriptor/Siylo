@@ -403,6 +403,31 @@
   color: #08101b;
 }
 
+.inspectorVolumeControl {
+  position: absolute;
+  right: max(18px, env(safe-area-inset-right));
+  top: calc(50% + 98px);
+  z-index: 12;
+  display: grid;
+  width: 78px;
+  gap: 5px;
+  padding: 8px 7px;
+  border-radius: 18px;
+  background: rgba(8, 16, 27, 0.92);
+  color: rgba(244, 247, 251, 0.88);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.26);
+  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
+  font-size: 0.62rem;
+  font-weight: 800;
+  line-height: 1.15;
+  text-align: center;
+}
+
+.inspectorVolumeControl input {
+  width: 100%;
+  accent-color: #f4f7fb;
+}
+
 .inspectorTalkButtonActive {
   background: linear-gradient(145deg, #ff7a7a, #d83c3c);
   color: #ffffff;
@@ -529,6 +554,12 @@
     right: 15px;
     top: calc(50% + 48px);
     width: 64px;
+  }
+
+  .inspectorVolumeControl {
+    right: 8px;
+    top: calc(50% + 88px);
+    width: 78px;
   }
 
   .keyboardActions {

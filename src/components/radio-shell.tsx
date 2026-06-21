@@ -7,6 +7,7 @@ import styles from "./radio-shell.module.css";
 const DEFAULT_SESSION_IDS = ["cmd-1", "cmd-2", "cursor", "codex"];
 const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
 const SESSION_STORAGE_KEY = "siylo-radio-session-id";
+const SPEECH_VOLUME_STORAGE_KEY = "siylo-radio-speech-volume";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
 const SESSION_POLL_INTERVAL_MS = 900;
@@ -71,6 +72,7 @@ export function RadioShell() {
   const [terminalInput, setTerminalInput] = useState("");
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
   const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
+  const [speechVolume, setSpeechVolume] = useState(1);
   const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
   const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
   const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
@@ -103,6 +105,7 @@ export function RadioShell() {
   const viewerCursorRef = useRef(viewerCursor);
   const viewerFallbackImageUrlRef = useRef("");
   const speechAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speechVolumeRef = useRef(1);
   const wasInspectorBusyRef = useRef(false);
   const spokenOutputSignatureRef = useRef("");
   const pendingInspectorSpeechSessionRef = useRef<string | null>(null);
@@ -143,6 +146,23 @@ export function RadioShell() {
       activeSessionIdRef.current = fallbackSessionId;
     }
   }, []);
+
+  useEffect(() => {
+    const storedSpeechVolume = Number(window.localStorage.getItem(SPEECH_VOLUME_STORAGE_KEY));
+    if (Number.isFinite(storedSpeechVolume)) {
+      const nextVolume = clampRatio(storedSpeechVolume);
+      speechVolumeRef.current = nextVolume;
+      setSpeechVolume(nextVolume);
+    }
+  }, []);
+
+  useEffect(() => {
+    speechVolumeRef.current = speechVolume;
+    window.localStorage.setItem(SPEECH_VOLUME_STORAGE_KEY, String(speechVolume));
+    if (speechAudioRef.current) {
+      speechAudioRef.current.volume = speechVolume;
+    }
+  }, [speechVolume]);
 
   useEffect(() => {
     activeSessionIdRef.current = currentSessionId;
@@ -460,6 +480,7 @@ export function RadioShell() {
       voiceApiBase,
       speechText,
       speechAudioRef,
+      speechVolumeRef,
       setIsSpeakingOutput,
       speechRequestSeqRef,
       speechRequestId
@@ -1499,6 +1520,17 @@ export function RadioShell() {
           >
             <span>Cancel Voice</span>
           </button>
+          <label className={styles.inspectorVolumeControl}>
+            <span>Voice {Math.round(speechVolume * 100)}%</span>
+            <input
+              type="range"
+              min="0"
+              max="1"
+              step="0.05"
+              value={speechVolume}
+              onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
+            />
+          </label>
         </div>
       ) : null}
 
@@ -1922,6 +1954,7 @@ async function speakTerminalOutput(
   voiceApiBase: string,
   text: string,
   speechAudioRef: MutableRefObject<HTMLAudioElement | null>,
+  speechVolumeRef: MutableRefObject<number>,
   setIsSpeakingOutput: Dispatch<SetStateAction<boolean>>,
   speechRequestSeqRef: MutableRefObject<number>,
   speechRequestId: number
@@ -1961,6 +1994,7 @@ async function speakTerminalOutput(
   }
 
   const audio = new Audio(audioUrl);
+  audio.volume = clampRatio(speechVolumeRef.current);
   speechAudioRef.current = audio;
   audio.onended = () => {
     URL.revokeObjectURL(audioUrl);
