@@ -1,6 +1,6 @@
 "use client";
 
-import type { Dispatch, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
+import type { Dispatch, MouseEvent, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
@@ -75,6 +75,7 @@ export function RadioShell() {
   const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
   const [speechVolume, setSpeechVolume] = useState(1);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isVolumeUpTestPressed, setIsVolumeUpTestPressed] = useState(false);
   const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
   const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
   const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
@@ -596,13 +597,26 @@ export function RadioShell() {
       }
 
       nativeHoldRequestedRef.current = true;
+      clearHoldTimer(holdTimerRef);
+      activePointerIdRef.current = null;
+      lastSessionTapRef.current = null;
       setIsPressingToRecord(true);
       const currentInspectorSessionId = inspectorSessionIdRef.current;
       pressTargetRef.current = currentInspectorSessionId || activeSessionIdRef.current;
       void handleHoldStart(NATIVE_VOLUME_POINTER_ID, { allowInspector: Boolean(currentInspectorSessionId) });
     }
 
-    window.__siyloNativeVolumeAction = (action) => {
+    function handleNativeVolumeAction(action: "volume-up" | "volume-up-start" | "volume-up-stop" | "volume-down") {
+      if (action === "volume-up-start") {
+        startNativeHold();
+        return;
+      }
+
+      if (action === "volume-up-stop") {
+        stopNativeHold();
+        return;
+      }
+
       if (action === "volume-up") {
         if (nativeHoldRequestedRef.current || holdStartedRef.current || recorderRef.current?.state === "recording") {
           stopNativeHold();
@@ -615,9 +629,28 @@ export function RadioShell() {
       if (action === "volume-down") {
         switchToNextSession();
       }
-    };
+    }
+
+    function handleNativeVolumeEvent(event: Event) {
+      const action = (event as CustomEvent<{ action?: string }>).detail?.action;
+      if (
+        action !== "volume-up" &&
+        action !== "volume-up-start" &&
+        action !== "volume-up-stop" &&
+        action !== "volume-down"
+      ) {
+        return;
+      }
+
+      event.preventDefault();
+      handleNativeVolumeAction(action);
+    }
+
+    window.__siyloNativeVolumeAction = handleNativeVolumeAction;
+    window.addEventListener("siylo-native-volume-action", handleNativeVolumeEvent);
 
     return () => {
+      window.removeEventListener("siylo-native-volume-action", handleNativeVolumeEvent);
       if (window.__siyloNativeVolumeAction) {
         delete window.__siyloNativeVolumeAction;
       }
@@ -1412,6 +1445,72 @@ export function RadioShell() {
     setCurrentSessionId(sessionId);
   }
 
+  function dispatchNativeVolumeTestAction(action: "volume-up-start" | "volume-up-stop" | "volume-down") {
+    const volumeEvent = new CustomEvent("siylo-native-volume-action", {
+      cancelable: true,
+      detail: { action }
+    });
+    window.dispatchEvent(volumeEvent);
+
+    if (!volumeEvent.defaultPrevented) {
+      window.__siyloNativeVolumeAction?.(action);
+    }
+  }
+
+  function handleVolumeUpTestStart(event: PointerEvent<HTMLButtonElement>) {
+    if (event.button !== 0 && event.pointerType === "mouse") {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopPropagation();
+    trySetPointerCapture(event.currentTarget, event.pointerId);
+    setIsVolumeUpTestPressed(true);
+    dispatchNativeVolumeTestAction("volume-up-start");
+  }
+
+  function handleVolumeUpTestEnd(event: PointerEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    tryReleasePointerCapture(event.currentTarget, event.pointerId);
+    setIsVolumeUpTestPressed(false);
+    dispatchNativeVolumeTestAction("volume-up-stop");
+  }
+
+  function handleVolumeDownTest(event: MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    dispatchNativeVolumeTestAction("volume-down");
+  }
+
+  const volumeTestControls = (
+    <div
+      className={styles.volumeTestStrip}
+      onPointerDown={(event) => event.stopPropagation()}
+      onPointerUp={(event) => event.stopPropagation()}
+      onPointerCancel={(event) => event.stopPropagation()}
+      onClick={(event) => event.stopPropagation()}
+    >
+      <button
+        type="button"
+        className={`${styles.volumeTestCard} ${isVolumeUpTestPressed ? styles.volumeTestCardPressed : ""}`}
+        onPointerDown={handleVolumeUpTestStart}
+        onPointerUp={handleVolumeUpTestEnd}
+        onPointerCancel={handleVolumeUpTestEnd}
+      >
+        Volume Up
+      </button>
+      <button
+        type="button"
+        className={styles.volumeTestCard}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={handleVolumeDownTest}
+      >
+        Volume Down
+      </button>
+    </div>
+  );
+
   return (
     <main
       ref={mainHoldAreaRef}
@@ -1476,6 +1575,8 @@ export function RadioShell() {
       </button>
 
       {activeView === "sessions" ? (
+        <>
+        {volumeTestControls}
         <div className={styles.sessionContainer}>
           {sessionSlots.map((slot) =>
             slot.kind === "session" ? (
@@ -1498,6 +1599,7 @@ export function RadioShell() {
             )
           )}
         </div>
+        </>
       ) : null}
 
       {activeView === "viewer" ? (
@@ -1602,6 +1704,7 @@ export function RadioShell() {
         <div className={styles.inspectorShell}>
           <div className={styles.inspectorBackdrop} onClick={closeInspector} aria-hidden="true" />
           <section className={styles.inspectorPanel}>
+            {volumeTestControls}
             <header className={styles.inspectorHeader}>
               <div>
                 <h2 className={styles.inspectorTitle}>{formatSessionLabel(inspectorSessionId)}</h2>
