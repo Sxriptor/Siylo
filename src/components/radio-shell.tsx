@@ -93,11 +93,15 @@ export function RadioShell() {
   const activePointerIdRef = useRef<number | null>(null);
   const holdTimerRef = useRef<number | null>(null);
   const holdStartedRef = useRef(false);
+  const nativeHoldRequestedRef = useRef(false);
   const pressTargetRef = useRef<string | null>(null);
   const lastSessionTapRef = useRef<{
     sessionId: string;
     timestamp: number;
   } | null>(null);
+  const statusRef = useRef(status);
+  const inspectorSessionIdRef = useRef(inspectorSessionId);
+  const voiceApiBaseRef = useRef(voiceApiBase);
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionIdsRef = useRef(sessionIds);
   const terminalInputRef = useRef<HTMLInputElement | null>(null);
@@ -170,6 +174,18 @@ export function RadioShell() {
       speechAudioRef.current.volume = speechVolume;
     }
   }, [speechVolume]);
+
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  useEffect(() => {
+    inspectorSessionIdRef.current = inspectorSessionId;
+  }, [inspectorSessionId]);
+
+  useEffect(() => {
+    voiceApiBaseRef.current = voiceApiBase;
+  }, [voiceApiBase]);
 
   useEffect(() => {
     activeSessionIdRef.current = currentSessionId;
@@ -523,7 +539,7 @@ export function RadioShell() {
       if (
         recorderRef.current?.state === "recording" ||
         holdStartedRef.current ||
-        activePointerIdRef.current === NATIVE_VOLUME_POINTER_ID
+        nativeHoldRequestedRef.current
       ) {
         return;
       }
@@ -533,7 +549,8 @@ export function RadioShell() {
         return;
       }
 
-      const activeSessionId = inspectorSessionId || activeSessionIdRef.current;
+      const currentInspectorSessionId = inspectorSessionIdRef.current;
+      const activeSessionId = currentInspectorSessionId || activeSessionIdRef.current;
       const activeIndex = Math.max(availableSessionIds.indexOf(activeSessionId), 0);
       const nextSessionId = availableSessionIds[(activeIndex + 1) % availableSessionIds.length] || availableSessionIds[0];
 
@@ -544,29 +561,54 @@ export function RadioShell() {
       setCurrentSessionId(nextSessionId);
       activeSessionIdRef.current = nextSessionId;
 
-      if (inspectorSessionId) {
+      if (currentInspectorSessionId) {
         openInspector(nextSessionId);
       }
     }
 
-    function toggleNativeHold() {
-      if (
-        recorderRef.current?.state === "recording" ||
-        holdStartedRef.current ||
-        activePointerIdRef.current === NATIVE_VOLUME_POINTER_ID
-      ) {
-        handleHoldEnd(NATIVE_VOLUME_POINTER_ID);
+    function stopNativeHold() {
+      nativeHoldRequestedRef.current = false;
+
+      if (recorderRef.current?.state === "recording") {
+        activePointerIdRef.current = null;
+        pressTargetRef.current = null;
+        lastSessionTapRef.current = null;
+        setIsPressingToRecord(false);
+        recorderRef.current.stop();
+        setStatus("processing");
         return;
       }
 
+      if (activePointerIdRef.current === NATIVE_VOLUME_POINTER_ID || holdStartedRef.current) {
+        handleHoldEnd(NATIVE_VOLUME_POINTER_ID);
+      }
+    }
+
+    function startNativeHold() {
+      if (
+        statusRef.current === "processing" ||
+        statusRef.current === "listening" ||
+        recorderRef.current?.state === "recording" ||
+        holdStartedRef.current ||
+        nativeHoldRequestedRef.current
+      ) {
+        return;
+      }
+
+      nativeHoldRequestedRef.current = true;
       setIsPressingToRecord(true);
-      pressTargetRef.current = inspectorSessionId || activeSessionIdRef.current;
-      void handleHoldStart(NATIVE_VOLUME_POINTER_ID, { allowInspector: Boolean(inspectorSessionId) });
+      const currentInspectorSessionId = inspectorSessionIdRef.current;
+      pressTargetRef.current = currentInspectorSessionId || activeSessionIdRef.current;
+      void handleHoldStart(NATIVE_VOLUME_POINTER_ID, { allowInspector: Boolean(currentInspectorSessionId) });
     }
 
     window.__siyloNativeVolumeAction = (action) => {
       if (action === "volume-up") {
-        toggleNativeHold();
+        if (nativeHoldRequestedRef.current || holdStartedRef.current || recorderRef.current?.state === "recording") {
+          stopNativeHold();
+        } else {
+          startNativeHold();
+        }
         return;
       }
 
@@ -580,7 +622,7 @@ export function RadioShell() {
         delete window.__siyloNativeVolumeAction;
       }
     };
-  }, [inspectorSessionId]);
+  }, []);
 
   useEffect(() => {
     const viewerWindow = viewerWindowRef.current;
@@ -719,7 +761,12 @@ export function RadioShell() {
   }
 
   async function handleHoldStart(pointerId: number, options: { allowInspector?: boolean } = {}) {
-    if (isBusy || isListening || (inspectorSessionId && !options.allowInspector)) {
+    const currentInspectorSessionId = inspectorSessionIdRef.current;
+    if (
+      statusRef.current === "processing" ||
+      statusRef.current === "listening" ||
+      (currentInspectorSessionId && !options.allowInspector)
+    ) {
       return;
     }
 
@@ -739,6 +786,12 @@ export function RadioShell() {
         return;
       }
 
+      if (pointerId === NATIVE_VOLUME_POINTER_ID && !nativeHoldRequestedRef.current) {
+        activePointerIdRef.current = null;
+        setIsPressingToRecord(false);
+        return;
+      }
+
       const mimeType = getSupportedMimeType();
       const recorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
 
@@ -750,11 +803,17 @@ export function RadioShell() {
         }
       };
       recorder.onerror = () => {
+        if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+          nativeHoldRequestedRef.current = false;
+        }
         setStatus("error");
       };
       recorder.onstop = async () => {
         recorderRef.current = null;
         holdStartedRef.current = false;
+        if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+          nativeHoldRequestedRef.current = false;
+        }
         const capturedTranscript = stopLiveTranscription();
         const blobType = recorder.mimeType || mimeType || "audio/webm";
         const audioBlob = new Blob(chunksRef.current, { type: blobType });
@@ -785,14 +844,18 @@ export function RadioShell() {
       startLiveTranscription();
     } catch {
       holdStartedRef.current = false;
+      if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+        nativeHoldRequestedRef.current = false;
+      }
       setIsPressingToRecord(false);
       setStatus("error");
       activePointerIdRef.current = null;
-      if (options.allowInspector && inspectorSessionId) {
+      const fallbackInspectorSessionId = inspectorSessionIdRef.current;
+      if (options.allowInspector && fallbackInspectorSessionId) {
         setSessionStream((currentValue) => ({
           ...(currentValue || {}),
           error: "Microphone access failed. On iPhone/iPad: Settings → Safari → Microphone → Allow. On Android: tap the lock icon in your browser address bar and allow microphone.",
-          sessionId: inspectorSessionId,
+          sessionId: fallbackInspectorSessionId,
           status: "error"
         }));
       }
@@ -845,6 +908,7 @@ export function RadioShell() {
       pressTargetRef.current = null;
 
       if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+        nativeHoldRequestedRef.current = false;
         setStatus("idle");
         return;
       }
@@ -868,6 +932,9 @@ export function RadioShell() {
 
     pressTargetRef.current = null;
     lastSessionTapRef.current = null;
+    if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+      nativeHoldRequestedRef.current = false;
+    }
 
     if (recorderRef.current?.state === "recording") {
       recorderRef.current.stop();
@@ -875,13 +942,14 @@ export function RadioShell() {
       return;
     }
 
-    if (status === "listening") {
+    if (statusRef.current === "listening") {
       holdStartedRef.current = false;
       setStatus("idle");
     }
   }
 
   function openInspector(sessionId: string) {
+    activeSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     setInspectorSessionId(sessionId);
     setSessionStream(null);
@@ -906,17 +974,19 @@ export function RadioShell() {
 
   async function uploadRecording(audioBlob: Blob, sessionId: string, transcript?: string) {
     setStatus("processing");
-    if (inspectorSessionId === sessionId) {
+    const currentInspectorSessionId = inspectorSessionIdRef.current;
+    if (currentInspectorSessionId === sessionId) {
       pendingInspectorSpeechSessionRef.current = sessionId;
     }
 
     try {
-      let resolvedVoiceApiBase = voiceApiBase;
+      let resolvedVoiceApiBase = voiceApiBaseRef.current;
       if (!resolvedVoiceApiBase) {
         const health = await probeVoiceBackend();
         resolvedVoiceApiBase = health?.baseUrl || "";
 
         if (resolvedVoiceApiBase) {
+          voiceApiBaseRef.current = resolvedVoiceApiBase;
           setVoiceApiBase(resolvedVoiceApiBase);
         }
       }
@@ -949,13 +1019,13 @@ export function RadioShell() {
       }
 
       applyVoicePayload(payload);
-      if (inspectorSessionId === sessionId) {
+      if (inspectorSessionIdRef.current === sessionId) {
         await refreshInspectorSessionOutput(resolvedVoiceApiBase, sessionId);
       }
       setStatus("executed");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Voice request failed.";
-      if (inspectorSessionId === sessionId) {
+      if (inspectorSessionIdRef.current === sessionId) {
         setSessionStream((currentValue) => ({
           ...(currentValue || {}),
           error: message,
