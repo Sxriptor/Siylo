@@ -332,7 +332,7 @@
   gap: 0;
   width: 100vw;
   max-height: none;
-  padding: max(16px, env(safe-area-inset-top)) 18px calc(96px + env(safe-area-inset-bottom)) 18px;
+  padding: calc(max(16px, env(safe-area-inset-top)) + 76px) 18px calc(96px + env(safe-area-inset-bottom)) 18px;
   border: 0;
   border-radius: 0;
   background:
@@ -343,12 +343,12 @@
 }
 
 .inspectorPanel > .volumeTestStrip {
-  position: relative;
-  top: auto;
-  left: auto;
-  right: auto;
-  z-index: 2;
-  margin: 0 0 12px;
+  position: absolute;
+  top: max(16px, env(safe-area-inset-top));
+  left: 18px;
+  right: 18px;
+  z-index: 20;
+  margin: 0;
 }
 
 .inspectorHeader {

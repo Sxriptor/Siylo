@@ -113,6 +113,9 @@ function App() {
   const ignoreNextBaselineVolumeRef = useRef(false);
   const resetFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reactivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const volumeResetTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
+  const audioSessionRefreshPromiseRef = useRef<Promise<void> | null>(null);
+  const volumeResetGenerationRef = useRef(0);
   const isHoldingVolumeTalkRef = useRef(false);
   const [currentUrl, setCurrentUrl] = useState(RADIO_URL);
 
@@ -176,6 +179,7 @@ function App() {
       if (reactivateTimerRef.current) {
         clearTimeout(reactivateTimerRef.current);
       }
+      clearVolumeResetTimers();
       void VolumeManager.showNativeVolumeUI({ enabled: true }).catch(() => {});
     };
   }, []);
@@ -193,18 +197,31 @@ function App() {
   }, []);
 
   async function keepVolumeCaptureActive() {
-    try {
-      await VolumeManager.enable(true, true);
-      await VolumeManager.setCategory("PlayAndRecord", true);
-      await VolumeManager.setMode("Default");
-      await VolumeManager.enableInSilenceMode(true);
-      await VolumeManager.setActive(true, true);
-      await VolumeManager.showNativeVolumeUI({ enabled: false });
-      await VolumeManager.setVolume(VOLUME_BASELINE, { showUI: false, playSound: false });
-      lastVolumeRef.current = VOLUME_BASELINE;
-    } catch {
-      // The WebView remains usable even if iOS refuses an audio-session refresh.
+    await activateVolumeSession();
+    await centerHardwareVolume();
+  }
+
+  async function activateVolumeSession() {
+    if (audioSessionRefreshPromiseRef.current) {
+      return audioSessionRefreshPromiseRef.current;
     }
+
+    audioSessionRefreshPromiseRef.current = (async () => {
+      try {
+        await VolumeManager.enable(true, true);
+        await VolumeManager.setCategory("PlayAndRecord", true);
+        await VolumeManager.setMode("Default");
+        await VolumeManager.enableInSilenceMode(true);
+        await VolumeManager.setActive(true, true);
+        await VolumeManager.showNativeVolumeUI({ enabled: false });
+      } catch {
+        // The WebView remains usable even if iOS refuses an audio-session refresh.
+      } finally {
+        audioSessionRefreshPromiseRef.current = null;
+      }
+    })();
+
+    return audioSessionRefreshPromiseRef.current;
   }
 
   function scheduleVolumeCaptureRefresh() {
@@ -219,22 +236,56 @@ function App() {
   }
 
   async function resetHardwareVolume() {
+    await centerHardwareVolume();
+  }
+
+  function clearVolumeResetTimers() {
+    for (const timer of volumeResetTimersRef.current) {
+      clearTimeout(timer);
+    }
+    volumeResetTimersRef.current = [];
+  }
+
+  async function centerHardwareVolume() {
     ignoreNextBaselineVolumeRef.current = true;
+    volumeResetGenerationRef.current += 1;
+    const generation = volumeResetGenerationRef.current;
+    clearVolumeResetTimers();
     if (resetFallbackTimerRef.current) {
       clearTimeout(resetFallbackTimerRef.current);
     }
-    try {
-      await VolumeManager.setActive(true, true);
-      await VolumeManager.showNativeVolumeUI({ enabled: false });
-      await VolumeManager.setVolume(VOLUME_BASELINE, { showUI: false, playSound: false });
-      lastVolumeRef.current = VOLUME_BASELINE;
-    } catch {
-      // Keep the remote usable if the OS denies volume reset.
-    } finally {
-      resetFallbackTimerRef.current = setTimeout(() => {
-        ignoreNextBaselineVolumeRef.current = false;
-      }, 500);
+
+    async function setCenteredVolume(expectedGeneration: number) {
+      if (volumeResetGenerationRef.current !== expectedGeneration) {
+        return;
+      }
+
+      try {
+        await activateVolumeSession();
+        if (volumeResetGenerationRef.current !== expectedGeneration) {
+          return;
+        }
+        await VolumeManager.setVolume(VOLUME_BASELINE, { showUI: false, playSound: false });
+        lastVolumeRef.current = VOLUME_BASELINE;
+      } catch {
+        // Keep the remote usable if iOS denies one of the reset attempts.
+      }
     }
+
+    void setCenteredVolume(generation);
+
+    for (const delay of [140, 320]) {
+      const timer = setTimeout(() => {
+        volumeResetTimersRef.current = volumeResetTimersRef.current.filter((currentTimer) => currentTimer !== timer);
+        void setCenteredVolume(generation);
+      }, delay);
+      volumeResetTimersRef.current.push(timer);
+    }
+
+    resetFallbackTimerRef.current = setTimeout(() => {
+      ignoreNextBaselineVolumeRef.current = false;
+      resetFallbackTimerRef.current = null;
+    }, 700);
   }
 
   function sendVolumeAction(action: NativeVolumeAction) {
