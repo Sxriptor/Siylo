@@ -112,6 +112,8 @@ export function RadioShell() {
   const viewerCursorRef = useRef(viewerCursor);
   const viewerFallbackImageUrlRef = useRef("");
   const speechAudioRef = useRef<HTMLAudioElement | null>(null);
+  const speechAudioContextRef = useRef<AudioContext | null>(null);
+  const speechGainNodeRef = useRef<GainNode | null>(null);
   const speechVolumeRef = useRef(1);
   const wasInspectorBusyRef = useRef(false);
   const spokenOutputSignatureRef = useRef("");
@@ -171,8 +173,10 @@ export function RadioShell() {
   useEffect(() => {
     speechVolumeRef.current = speechVolume;
     window.localStorage.setItem(SPEECH_VOLUME_STORAGE_KEY, String(speechVolume));
-    if (speechAudioRef.current) {
-      speechAudioRef.current.volume = speechVolume;
+    if (speechGainNodeRef.current) {
+      speechGainNodeRef.current.gain.value = Math.max(0, speechVolume);
+    } else if (speechAudioRef.current) {
+      speechAudioRef.current.volume = clampRatio(Math.min(1, speechVolume));
     }
   }, [speechVolume]);
 
@@ -505,6 +509,8 @@ export function RadioShell() {
       speechText,
       speechAudioRef,
       speechVolumeRef,
+      speechAudioContextRef,
+      speechGainNodeRef,
       setIsSpeakingOutput,
       speechRequestSeqRef,
       speechRequestId
@@ -957,7 +963,7 @@ export function RadioShell() {
         setCurrentSessionId(pressedTarget);
         setStatus("idle");
         lastSessionTapRef.current = null;
-        openInspector(pressedTarget);
+        openInspector(pressedTarget, true);
       }
 
       return;
@@ -981,7 +987,7 @@ export function RadioShell() {
     }
   }
 
-  function openInspector(sessionId: string) {
+  function openInspector(sessionId: string, announceLabel = false) {
     activeSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     setInspectorSessionId(sessionId);
@@ -992,6 +998,23 @@ export function RadioShell() {
     wasInspectorBusyRef.current = false;
     spokenOutputSignatureRef.current = "";
     pendingInspectorSpeechSessionRef.current = null;
+
+    if (announceLabel && voiceApiBase) {
+      stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
+      const labelText = formatSessionLabelForSpeech(sessionId);
+      const speechRequestId = ++speechRequestSeqRef.current;
+      void speakTerminalOutput(
+        voiceApiBase,
+        labelText,
+        speechAudioRef,
+        speechVolumeRef,
+        speechAudioContextRef,
+        speechGainNodeRef,
+        setIsSpeakingOutput,
+        speechRequestSeqRef,
+        speechRequestId
+      );
+    }
   }
 
   function closeInspector() {
@@ -1002,7 +1025,7 @@ export function RadioShell() {
     setIsSendingTerminalInput(false);
     pendingInspectorSpeechSessionRef.current = null;
     speechRequestSeqRef.current += 1;
-    stopTerminalSpeechPlayback(speechAudioRef, setIsSpeakingOutput);
+    stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
   }
 
   async function uploadRecording(audioBlob: Blob, sessionId: string, transcript?: string) {
@@ -1830,7 +1853,7 @@ export function RadioShell() {
             className={`${styles.inspectorSpeechButton} ${isSpeakingOutput ? styles.inspectorSpeechButtonActive : ""}`}
             aria-label="Cancel spoken terminal output"
             onClick={() => {
-              stopTerminalSpeechPlayback(speechAudioRef, setIsSpeakingOutput);
+              stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
               speechRequestSeqRef.current += 1;
               pendingInspectorSpeechSessionRef.current = null;
               if (inspectorSessionId) {
@@ -1861,11 +1884,11 @@ export function RadioShell() {
             </header>
             <label className={styles.settingsRange}>
               <span>Voice output</span>
-              <strong>{Math.round(speechVolume * 100)}%</strong>
+              <strong>{speechVolume.toFixed(1)}x</strong>
               <input
                 type="range"
                 min="0"
-                max="1"
+                max="10"
                 step="0.05"
                 value={speechVolume}
                 onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
@@ -2302,6 +2325,8 @@ async function speakTerminalOutput(
   text: string,
   speechAudioRef: MutableRefObject<HTMLAudioElement | null>,
   speechVolumeRef: MutableRefObject<number>,
+  speechAudioContextRef: MutableRefObject<AudioContext | null>,
+  speechGainNodeRef: MutableRefObject<GainNode | null>,
   setIsSpeakingOutput: Dispatch<SetStateAction<boolean>>,
   speechRequestSeqRef: MutableRefObject<number>,
   speechRequestId: number
@@ -2341,12 +2366,47 @@ async function speakTerminalOutput(
   }
 
   const audio = new Audio(audioUrl);
-  audio.volume = clampRatio(speechVolumeRef.current);
   speechAudioRef.current = audio;
+
+  // Use Web Audio GainNode so the slider can boost past 100%
+  const audioWindow = window as Window & {
+    AudioContext?: typeof AudioContext;
+    webkitAudioContext?: typeof AudioContext;
+  };
+  const AudioContextCtor = audioWindow.AudioContext || audioWindow.webkitAudioContext;
+  let usedGainNode = false;
+
+  if (AudioContextCtor) {
+    try {
+      let audioCtx = speechAudioContextRef.current;
+      if (!audioCtx || audioCtx.state === "closed") {
+        audioCtx = new AudioContextCtor();
+        speechAudioContextRef.current = audioCtx;
+      }
+      if (audioCtx.state === "suspended") {
+        await audioCtx.resume();
+      }
+      const source = audioCtx.createMediaElementSource(audio);
+      const gainNode = audioCtx.createGain();
+      gainNode.gain.value = Math.max(0, speechVolumeRef.current);
+      source.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      speechGainNodeRef.current = gainNode;
+      usedGainNode = true;
+    } catch {
+      // Fall through to direct volume
+    }
+  }
+
+  if (!usedGainNode) {
+    audio.volume = clampRatio(Math.min(1, speechVolumeRef.current));
+  }
+
   audio.onended = () => {
     URL.revokeObjectURL(audioUrl);
     if (speechAudioRef.current === audio) {
       speechAudioRef.current = null;
+      speechGainNodeRef.current = null;
     }
     if (speechRequestSeqRef.current === speechRequestId) {
       setIsSpeakingOutput(false);
@@ -2356,6 +2416,7 @@ async function speakTerminalOutput(
     URL.revokeObjectURL(audioUrl);
     if (speechAudioRef.current === audio) {
       speechAudioRef.current = null;
+      speechGainNodeRef.current = null;
     }
     if (speechRequestSeqRef.current === speechRequestId) {
       setIsSpeakingOutput(false);
@@ -2365,6 +2426,7 @@ async function speakTerminalOutput(
 
 function stopTerminalSpeechPlayback(
   speechAudioRef: MutableRefObject<HTMLAudioElement | null>,
+  speechGainNodeRef: MutableRefObject<GainNode | null>,
   setIsSpeakingOutput: Dispatch<SetStateAction<boolean>>
 ) {
   const activeAudio = speechAudioRef.current;
@@ -2377,6 +2439,7 @@ function stopTerminalSpeechPlayback(
     speechAudioRef.current = null;
   }
 
+  speechGainNodeRef.current = null;
   setIsSpeakingOutput(false);
 }
 
@@ -2545,6 +2608,10 @@ function sortSessionIds(sessionIds: string[]) {
 
     return left.localeCompare(right);
   });
+}
+
+function formatSessionLabelForSpeech(sessionId: string) {
+  return formatSessionLabel(sessionId).replace(/-/g, " ");
 }
 
 function formatSessionLabel(sessionId: string) {
