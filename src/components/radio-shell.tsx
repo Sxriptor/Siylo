@@ -1,6 +1,6 @@
 "use client";
 
-import type { Dispatch, MouseEvent, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
+import type { Dispatch, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
@@ -75,8 +75,6 @@ export function RadioShell() {
   const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
   const [speechVolume, setSpeechVolume] = useState(1);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  const [isVolumeUpTestPressed, setIsVolumeUpTestPressed] = useState(false);
-  const [isVolumeDownTestPressed, setIsVolumeDownTestPressed] = useState(false);
   const [desktopFrame, setDesktopFrame] = useState<DesktopFrameState | null>(null);
   const [viewerCursor, setViewerCursor] = useState({ x: 0.5, y: 0.5 });
   const [isViewerControlEnabled, setIsViewerControlEnabled] = useState(true);
@@ -120,7 +118,6 @@ export function RadioShell() {
   const spokenOutputSignatureRef = useRef("");
   const pendingInspectorSpeechSessionRef = useRef<string | null>(null);
   const speechRequestSeqRef = useRef(0);
-  const volumeDownTestFlashTimerRef = useRef<number | null>(null);
   const viewerPointersRef = useRef<Map<number, { x: number; y: number }>>(new Map());
   const viewerPinchRef = useRef<{ distance: number; zoom: number } | null>(null);
   const viewerTouchDragRef = useRef<{
@@ -544,17 +541,6 @@ export function RadioShell() {
   }, [isKeyboardOpen]);
 
   useEffect(() => {
-    function flashVolumeDownTestCard() {
-      setIsVolumeDownTestPressed(true);
-      if (volumeDownTestFlashTimerRef.current) {
-        window.clearTimeout(volumeDownTestFlashTimerRef.current);
-      }
-      volumeDownTestFlashTimerRef.current = window.setTimeout(() => {
-        setIsVolumeDownTestPressed(false);
-        volumeDownTestFlashTimerRef.current = null;
-      }, 180);
-    }
-
     function switchToNextSession() {
       if (
         recorderRef.current?.state === "recording" ||
@@ -587,7 +573,6 @@ export function RadioShell() {
     }
 
     function stopNativeHold() {
-      setIsVolumeUpTestPressed(false);
       nativeHoldRequestedRef.current = false;
 
       if (recorderRef.current?.state === "recording") {
@@ -617,7 +602,6 @@ export function RadioShell() {
       }
 
       nativeHoldRequestedRef.current = true;
-      setIsVolumeUpTestPressed(true);
       clearHoldTimer(holdTimerRef);
       activePointerIdRef.current = null;
       lastSessionTapRef.current = null;
@@ -648,7 +632,6 @@ export function RadioShell() {
       }
 
       if (action === "volume-down") {
-        flashVolumeDownTestCard();
         switchToNextSession();
       }
     }
@@ -706,9 +689,6 @@ export function RadioShell() {
     return () => {
       clearHoldTimer(holdTimerRef);
       clearPendingSessionTimeouts(pendingSessionTimeoutsRef.current);
-      if (volumeDownTestFlashTimerRef.current) {
-        window.clearTimeout(volumeDownTestFlashTimerRef.current);
-      }
 
       if (recorderRef.current?.state === "recording") {
         recorderRef.current.stop();
@@ -863,7 +843,6 @@ export function RadioShell() {
       recorder.onerror = () => {
         if (pointerId === NATIVE_VOLUME_POINTER_ID) {
           nativeHoldRequestedRef.current = false;
-          setIsVolumeUpTestPressed(false);
         }
         setStatus("error");
       };
@@ -872,7 +851,6 @@ export function RadioShell() {
         holdStartedRef.current = false;
         if (pointerId === NATIVE_VOLUME_POINTER_ID) {
           nativeHoldRequestedRef.current = false;
-          setIsVolumeUpTestPressed(false);
         }
         const capturedTranscript = stopLiveTranscription();
         const blobType = recorder.mimeType || mimeType || "audio/webm";
@@ -906,7 +884,6 @@ export function RadioShell() {
       holdStartedRef.current = false;
       if (pointerId === NATIVE_VOLUME_POINTER_ID) {
         nativeHoldRequestedRef.current = false;
-        setIsVolumeUpTestPressed(false);
       }
       setIsPressingToRecord(false);
       setStatus("error");
@@ -970,7 +947,6 @@ export function RadioShell() {
 
       if (pointerId === NATIVE_VOLUME_POINTER_ID) {
         nativeHoldRequestedRef.current = false;
-        setIsVolumeUpTestPressed(false);
         setStatus("idle");
         return;
       }
@@ -996,7 +972,6 @@ export function RadioShell() {
     lastSessionTapRef.current = null;
     if (pointerId === NATIVE_VOLUME_POINTER_ID) {
       nativeHoldRequestedRef.current = false;
-      setIsVolumeUpTestPressed(false);
     }
 
     if (recorderRef.current?.state === "recording") {
@@ -1492,62 +1467,6 @@ export function RadioShell() {
     setCurrentSessionId(sessionId);
   }
 
-  function dispatchNativeVolumeTestAction(action: "volume-up-start" | "volume-up-stop" | "volume-down") {
-    const volumeEvent = new CustomEvent("siylo-native-volume-action", {
-      cancelable: true,
-      detail: { action }
-    });
-    window.dispatchEvent(volumeEvent);
-
-    if (!volumeEvent.defaultPrevented) {
-      window.__siyloNativeVolumeAction?.(action);
-    }
-  }
-
-  function handleVolumeUpTest(event: MouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    if (nativeHoldRequestedRef.current || holdStartedRef.current || recorderRef.current?.state === "recording") {
-      dispatchNativeVolumeTestAction("volume-up-stop");
-      return;
-    }
-
-    dispatchNativeVolumeTestAction("volume-up-start");
-  }
-
-  function handleVolumeDownTest(event: MouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    event.stopPropagation();
-    dispatchNativeVolumeTestAction("volume-down");
-  }
-
-  const volumeTestControls = (
-    <div
-      className={styles.volumeTestStrip}
-      onPointerDown={(event) => event.stopPropagation()}
-      onPointerUp={(event) => event.stopPropagation()}
-      onPointerCancel={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        className={`${styles.volumeTestCard} ${isVolumeUpTestPressed ? styles.volumeTestCardPressed : ""}`}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={handleVolumeUpTest}
-      >
-        Volume Up
-      </button>
-      <button
-        type="button"
-        className={`${styles.volumeTestCard} ${isVolumeDownTestPressed ? styles.volumeTestCardPressed : ""}`}
-        onPointerDown={(event) => event.stopPropagation()}
-        onClick={handleVolumeDownTest}
-      >
-        Volume Down
-      </button>
-    </div>
-  );
-
   return (
     <main
       ref={mainHoldAreaRef}
@@ -1612,8 +1531,6 @@ export function RadioShell() {
       </button>
 
       {activeView === "sessions" ? (
-        <>
-        {volumeTestControls}
         <div className={styles.sessionContainer}>
           {sessionSlots.map((slot) =>
             slot.kind === "session" ? (
@@ -1636,7 +1553,6 @@ export function RadioShell() {
             )
           )}
         </div>
-        </>
       ) : null}
 
       {activeView === "viewer" ? (
@@ -1741,7 +1657,6 @@ export function RadioShell() {
         <div className={styles.inspectorShell}>
           <div className={styles.inspectorBackdrop} onClick={closeInspector} aria-hidden="true" />
           <section className={styles.inspectorPanel}>
-            {volumeTestControls}
             <header className={styles.inspectorHeader}>
               <div>
                 <h2 className={styles.inspectorTitle}>{formatSessionLabel(inspectorSessionId)}</h2>

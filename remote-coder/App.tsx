@@ -11,6 +11,7 @@ const RADIO_URL = "https://radio.ascendixgear.com/radio";
 const VOLUME_BASELINE = 0.5;
 const VOLUME_STEP_THRESHOLD = 0.04;
 const VOLUME_RESET_TOLERANCE = 0.015;
+const HARDWARE_EVENT_COOLDOWN_MS = 420;
 type NativeVolumeAction = "volume-up-start" | "volume-up-stop" | "volume-down";
 const RadioWebView = WebView as unknown as React.ComponentType<
   WebViewProps & { ref?: React.Ref<WebView> }
@@ -110,7 +111,9 @@ const WEB_REMOTE_BRIDGE = `
 function App() {
   const webViewRef = useRef<WebView>(null);
   const lastVolumeRef = useRef(VOLUME_BASELINE);
+  const lastHardwareEventAtRef = useRef(0);
   const ignoreNextBaselineVolumeRef = useRef(false);
+  const awaitingHardwareResetRef = useRef(false);
   const resetFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reactivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const volumeResetTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
@@ -129,12 +132,30 @@ function App() {
 
     async function setupVolumeButtons() {
       try {
-        await keepVolumeCaptureActive();
+        await activateVolumeSession();
+        await centerHardwareVolume();
         const initialVolume = await VolumeManager.getVolume();
         lastVolumeRef.current = initialVolume.volume ?? VOLUME_BASELINE;
 
         listener = VolumeManager.addVolumeListener(({ volume }) => {
           if (!mounted || typeof volume !== "number") {
+            return;
+          }
+
+          const now = Date.now();
+
+          if (
+            awaitingHardwareResetRef.current &&
+            Math.abs(volume - VOLUME_BASELINE) <= VOLUME_RESET_TOLERANCE
+          ) {
+            awaitingHardwareResetRef.current = false;
+            ignoreNextBaselineVolumeRef.current = false;
+            lastVolumeRef.current = volume;
+            return;
+          }
+
+          if (awaitingHardwareResetRef.current) {
+            lastVolumeRef.current = volume;
             return;
           }
 
@@ -150,7 +171,13 @@ function App() {
           const delta = volume - lastVolumeRef.current;
           lastVolumeRef.current = volume;
 
+          if (now - lastHardwareEventAtRef.current < HARDWARE_EVENT_COOLDOWN_MS) {
+            return;
+          }
+
           if (delta >= VOLUME_STEP_THRESHOLD) {
+            lastHardwareEventAtRef.current = now;
+            awaitingHardwareResetRef.current = true;
             isHoldingVolumeTalkRef.current = !isHoldingVolumeTalkRef.current;
             sendVolumeAction(isHoldingVolumeTalkRef.current ? "volume-up-start" : "volume-up-stop");
             void resetHardwareVolume();
@@ -158,6 +185,8 @@ function App() {
           }
 
           if (delta <= -VOLUME_STEP_THRESHOLD) {
+            lastHardwareEventAtRef.current = now;
+            awaitingHardwareResetRef.current = true;
             isHoldingVolumeTalkRef.current = false;
             sendVolumeAction("volume-down");
             void resetHardwareVolume();
@@ -198,7 +227,6 @@ function App() {
 
   async function keepVolumeCaptureActive() {
     await activateVolumeSession();
-    await centerHardwareVolume();
   }
 
   async function activateVolumeSession() {
@@ -283,9 +311,10 @@ function App() {
     }
 
     resetFallbackTimerRef.current = setTimeout(() => {
+      awaitingHardwareResetRef.current = false;
       ignoreNextBaselineVolumeRef.current = false;
       resetFallbackTimerRef.current = null;
-    }, 700);
+    }, 260);
   }
 
   function sendVolumeAction(action: NativeVolumeAction) {

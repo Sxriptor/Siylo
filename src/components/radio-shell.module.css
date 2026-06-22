@@ -51,42 +51,6 @@
   height: 21px;
 }
 
-.volumeTestStrip {
-  position: absolute;
-  top: calc(max(14px, env(safe-area-inset-top)) + 56px);
-  left: max(14px, env(safe-area-inset-left));
-  right: max(14px, env(safe-area-inset-right));
-  z-index: 14;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-  touch-action: none;
-}
-
-.volumeTestCard {
-  min-height: 58px;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 8px;
-  background: #05070d;
-  color: #f4f7fb;
-  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.34);
-  font-family: "Trebuchet MS", "Avenir Next", sans-serif;
-  font-size: 0.85rem;
-  font-weight: 800;
-  letter-spacing: 0;
-  text-transform: uppercase;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-touch-callout: none;
-}
-
-.volumeTestCardPressed {
-  background: #f4f7fb;
-  color: #05070d;
-  border-color: #f4f7fb;
-}
-
 .viewerDock {
   position: absolute;
   top: 18px;
@@ -332,7 +296,7 @@
   gap: 0;
   width: 100vw;
   max-height: none;
-  padding: calc(max(16px, env(safe-area-inset-top)) + 76px) 18px calc(96px + env(safe-area-inset-bottom)) 18px;
+  padding: max(16px, env(safe-area-inset-top)) 18px calc(96px + env(safe-area-inset-bottom)) 18px;
   border: 0;
   border-radius: 0;
   background:
@@ -340,15 +304,6 @@
   box-shadow: none;
   backdrop-filter: none;
   overflow: hidden;
-}
-
-.inspectorPanel > .volumeTestStrip {
-  position: absolute;
-  top: max(16px, env(safe-area-inset-top));
-  left: 18px;
-  right: 18px;
-  z-index: 20;
-  margin: 0;
 }
 
 .inspectorHeader {
