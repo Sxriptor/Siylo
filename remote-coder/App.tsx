@@ -1,11 +1,11 @@
 import { requestRecordingPermissionsAsync } from "expo-audio";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, StyleSheet, Text, View } from "react-native";
+import { ActivityIndicator, AppState, StyleSheet, Text, View } from "react-native";
 import { SafeAreaProvider, SafeAreaView } from "react-native-safe-area-context";
 import { VolumeManager } from "react-native-volume-manager";
 import WebView from "react-native-webview";
-import type { WebViewNavigation, WebViewProps } from "react-native-webview";
+import type { WebViewMessageEvent, WebViewNavigation, WebViewProps } from "react-native-webview";
 
 const RADIO_URL = "https://radio.ascendixgear.com/radio";
 const VOLUME_BASELINE = 0.5;
@@ -92,6 +92,17 @@ const WEB_REMOTE_BRIDGE = `
     window.__siyloNativePressToTalk(window.__siyloNativeFallbackHolding ? "start" : "stop");
   };
 
+  function notifyNativeInteraction() {
+    if (!window.ReactNativeWebView) {
+      return;
+    }
+
+    window.ReactNativeWebView.postMessage(JSON.stringify({ type: "siylo-webview-interaction" }));
+  }
+
+  document.addEventListener("pointerdown", notifyNativeInteraction, { capture: true, passive: true });
+  document.addEventListener("touchstart", notifyNativeInteraction, { capture: true, passive: true });
+
   true;
 })();
 `;
@@ -101,6 +112,7 @@ function App() {
   const lastVolumeRef = useRef(VOLUME_BASELINE);
   const ignoreNextBaselineVolumeRef = useRef(false);
   const resetFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reactivateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isHoldingVolumeTalkRef = useRef(false);
   const [currentUrl, setCurrentUrl] = useState(RADIO_URL);
 
@@ -114,8 +126,7 @@ function App() {
 
     async function setupVolumeButtons() {
       try {
-        await VolumeManager.showNativeVolumeUI({ enabled: false });
-        await VolumeManager.setVolume(VOLUME_BASELINE);
+        await keepVolumeCaptureActive();
         const initialVolume = await VolumeManager.getVolume();
         lastVolumeRef.current = initialVolume.volume ?? VOLUME_BASELINE;
 
@@ -162,9 +173,50 @@ function App() {
       if (resetFallbackTimerRef.current) {
         clearTimeout(resetFallbackTimerRef.current);
       }
+      if (reactivateTimerRef.current) {
+        clearTimeout(reactivateTimerRef.current);
+      }
       void VolumeManager.showNativeVolumeUI({ enabled: true }).catch(() => {});
     };
   }, []);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        scheduleVolumeCaptureRefresh();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  async function keepVolumeCaptureActive() {
+    try {
+      await VolumeManager.enable(true, true);
+      await VolumeManager.setCategory("PlayAndRecord", true);
+      await VolumeManager.setMode("Default");
+      await VolumeManager.enableInSilenceMode(true);
+      await VolumeManager.setActive(true, true);
+      await VolumeManager.showNativeVolumeUI({ enabled: false });
+      await VolumeManager.setVolume(VOLUME_BASELINE, { showUI: false, playSound: false });
+      lastVolumeRef.current = VOLUME_BASELINE;
+    } catch {
+      // The WebView remains usable even if iOS refuses an audio-session refresh.
+    }
+  }
+
+  function scheduleVolumeCaptureRefresh() {
+    if (reactivateTimerRef.current) {
+      clearTimeout(reactivateTimerRef.current);
+    }
+
+    reactivateTimerRef.current = setTimeout(() => {
+      reactivateTimerRef.current = null;
+      void keepVolumeCaptureActive();
+    }, 60);
+  }
 
   async function resetHardwareVolume() {
     ignoreNextBaselineVolumeRef.current = true;
@@ -172,7 +224,9 @@ function App() {
       clearTimeout(resetFallbackTimerRef.current);
     }
     try {
-      await VolumeManager.setVolume(VOLUME_BASELINE);
+      await VolumeManager.setActive(true, true);
+      await VolumeManager.showNativeVolumeUI({ enabled: false });
+      await VolumeManager.setVolume(VOLUME_BASELINE, { showUI: false, playSound: false });
       lastVolumeRef.current = VOLUME_BASELINE;
     } catch {
       // Keep the remote usable if the OS denies volume reset.
@@ -203,6 +257,17 @@ function App() {
     setCurrentUrl(event.url || RADIO_URL);
   }
 
+  function onWebViewMessage(event: WebViewMessageEvent) {
+    try {
+      const payload = JSON.parse(event.nativeEvent.data) as { type?: string };
+      if (payload.type === "siylo-webview-interaction") {
+        scheduleVolumeCaptureRefresh();
+      }
+    } catch {
+      // Ignore messages not sent by our injected bridge.
+    }
+  }
+
   return (
     <SafeAreaProvider>
       <SafeAreaView style={styles.safeArea}>
@@ -223,8 +288,10 @@ function App() {
           injectedJavaScript={WEB_REMOTE_BRIDGE}
           injectedJavaScriptBeforeContentLoaded={WEB_REMOTE_BRIDGE}
           onNavigationStateChange={onNavigationStateChange}
+          onMessage={onWebViewMessage}
           onLoadEnd={() => {
             webViewRef.current?.injectJavaScript(WEB_REMOTE_BRIDGE);
+            scheduleVolumeCaptureRefresh();
           }}
           startInLoadingState
           renderLoading={() => (
