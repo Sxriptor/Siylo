@@ -464,6 +464,39 @@
   line-height: 1;
 }
 
+.liveTranscript {
+  position: absolute;
+  bottom: 168px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: min(420px, calc(100vw - 48px));
+  width: max-content;
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: rgba(8, 12, 20, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(16px);
+  color: rgba(244, 247, 251, 0.9);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  text-align: center;
+  white-space: pre-wrap;
+  word-break: break-word;
+  z-index: 2;
+  animation: fadeInUp 120ms ease;
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
 .micIconContainer {
   position: absolute;
   bottom: 84px;

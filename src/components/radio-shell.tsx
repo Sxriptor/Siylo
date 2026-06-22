@@ -14,6 +14,7 @@ const SESSION_POLL_INTERVAL_MS = 900;
 const PENDING_SESSION_GRACE_MS = 5000;
 const MIN_AUDIBLE_PEAK = 0.015;
 const MIN_AUDIBLE_RMS = 0.003;
+const NATIVE_VOLUME_POINTER_ID = 989001;
 const TRACKPAD_TOUCH_DEADZONE_PX = 6;
 const TRACKPAD_TOUCH_SENSITIVITY = 0.62;
 
@@ -121,6 +122,11 @@ export function RadioShell() {
     startX: number;
     startY: number;
   } | null>(null);
+
+  const [liveTranscript, setLiveTranscript] = useState("");
+  const liveTranscriptRef = useRef("");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const recognitionRef = useRef<any>(null);
 
   const isBusy = status === "processing";
   const isListening = status === "listening";
@@ -513,10 +519,12 @@ export function RadioShell() {
   }, [isKeyboardOpen]);
 
   useEffect(() => {
-    const nativePointerId = 989001;
-
     function switchToNextSession() {
-      if (recorderRef.current?.state === "recording" || holdStartedRef.current || activePointerIdRef.current === nativePointerId) {
+      if (
+        recorderRef.current?.state === "recording" ||
+        holdStartedRef.current ||
+        activePointerIdRef.current === NATIVE_VOLUME_POINTER_ID
+      ) {
         return;
       }
 
@@ -542,14 +550,18 @@ export function RadioShell() {
     }
 
     function toggleNativeHold() {
-      if (recorderRef.current?.state === "recording" || holdStartedRef.current || activePointerIdRef.current === nativePointerId) {
-        handleHoldEnd(nativePointerId);
+      if (
+        recorderRef.current?.state === "recording" ||
+        holdStartedRef.current ||
+        activePointerIdRef.current === NATIVE_VOLUME_POINTER_ID
+      ) {
+        handleHoldEnd(NATIVE_VOLUME_POINTER_ID);
         return;
       }
 
       setIsPressingToRecord(true);
       pressTargetRef.current = inspectorSessionId || activeSessionIdRef.current;
-      void handleHoldStart(nativePointerId, { allowInspector: Boolean(inspectorSessionId) });
+      void handleHoldStart(NATIVE_VOLUME_POINTER_ID, { allowInspector: Boolean(inspectorSessionId) });
     }
 
     window.__siyloNativeVolumeAction = (action) => {
@@ -661,6 +673,51 @@ export function RadioShell() {
     return () => area.removeEventListener("touchstart", onTouchStart);
   }, []);
 
+  function startLiveTranscription() {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const w = window as any;
+    const SpeechRecognitionAPI = w.SpeechRecognition || w.webkitSpeechRecognition;
+    if (!SpeechRecognitionAPI) return;
+
+    const recognition = new SpeechRecognitionAPI();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    recognition.onresult = (event: any) => {
+      let interim = "";
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        interim += event.results[i][0].transcript;
+      }
+      const trimmed = interim.trim();
+      liveTranscriptRef.current = trimmed;
+      setLiveTranscript(trimmed);
+    };
+
+    recognition.onerror = () => {
+      // Silently ignore — MediaRecorder is the authoritative capture path
+    };
+
+    try {
+      recognition.start();
+      recognitionRef.current = recognition;
+    } catch {
+      // SpeechRecognition may be unavailable or already active
+    }
+  }
+
+  function stopLiveTranscription(): string {
+    const captured = liveTranscriptRef.current;
+    liveTranscriptRef.current = "";
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop(); } catch { /* ignore */ }
+      recognitionRef.current = null;
+    }
+    setLiveTranscript("");
+    return captured;
+  }
+
   async function handleHoldStart(pointerId: number, options: { allowInspector?: boolean } = {}) {
     if (isBusy || isListening || (inspectorSessionId && !options.allowInspector)) {
       return;
@@ -698,9 +755,15 @@ export function RadioShell() {
       recorder.onstop = async () => {
         recorderRef.current = null;
         holdStartedRef.current = false;
+        const capturedTranscript = stopLiveTranscription();
         const blobType = recorder.mimeType || mimeType || "audio/webm";
         const audioBlob = new Blob(chunksRef.current, { type: blobType });
         chunksRef.current = [];
+
+        if (capturedTranscript) {
+          await uploadRecording(audioBlob, activeSessionIdRef.current, capturedTranscript);
+          return;
+        }
 
         if (audioBlob.size === 0) {
           setStatus("idle");
@@ -719,6 +782,7 @@ export function RadioShell() {
       recorder.start();
       holdStartedRef.current = true;
       setStatus("listening");
+      startLiveTranscription();
     } catch {
       holdStartedRef.current = false;
       setIsPressingToRecord(false);
@@ -780,6 +844,11 @@ export function RadioShell() {
       const pressedTarget = pressTargetRef.current;
       pressTargetRef.current = null;
 
+      if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+        setStatus("idle");
+        return;
+      }
+
       if (pressedTarget === "__launcher__") {
         lastSessionTapRef.current = null;
         setIsLauncherOpen(true);
@@ -835,7 +904,7 @@ export function RadioShell() {
     stopTerminalSpeechPlayback(speechAudioRef, setIsSpeakingOutput);
   }
 
-  async function uploadRecording(audioBlob: Blob, sessionId: string) {
+  async function uploadRecording(audioBlob: Blob, sessionId: string, transcript?: string) {
     setStatus("processing");
     if (inspectorSessionId === sessionId) {
       pendingInspectorSpeechSessionRef.current = sessionId;
@@ -856,14 +925,22 @@ export function RadioShell() {
         throw new Error("Voice backend unavailable.");
       }
 
-      const formData = new FormData();
-      formData.append("audio", audioBlob, `radio-input.${getFileExtension(audioBlob.type)}`);
-      formData.append("sessionId", sessionId);
-
-      const response = await fetch(`${resolvedVoiceApiBase}/voice`, {
-        method: "POST",
-        body: formData
-      });
+      let response: Response;
+      if (transcript) {
+        response = await fetch(`${resolvedVoiceApiBase}/voice`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionId, transcript })
+        });
+      } else {
+        const formData = new FormData();
+        formData.append("audio", audioBlob, `radio-input.${getFileExtension(audioBlob.type)}`);
+        formData.append("sessionId", sessionId);
+        response = await fetch(`${resolvedVoiceApiBase}/voice`, {
+          method: "POST",
+          body: formData
+        });
+      }
 
       const payload = await parseVoiceResponse(response);
 
@@ -1622,6 +1699,12 @@ export function RadioShell() {
               />
             </label>
           </section>
+        </div>
+      ) : null}
+
+      {isListening && liveTranscript ? (
+        <div className={styles.liveTranscript} aria-live="polite">
+          {liveTranscript}
         </div>
       ) : null}
 
