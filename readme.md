@@ -13,6 +13,8 @@ The current build focuses on a small working surface:
 - capture and return a desktop screenshot
 - launch a few mapped apps such as `cursor` and `vscode`
 - inspect recent runtime logs from Discord
+- expose the radio remote surface through a named Cloudflare Tunnel
+- support the companion mobile app over that same tunnel URL
 
 ## Stack
 
@@ -79,6 +81,22 @@ Type-check the project:
 ```bash
 npm run typecheck
 ```
+
+## Remote Access And Mobile App
+
+Siylo now supports a remote radio surface that stays local on the PC and is meant to be published only through a named Cloudflare Tunnel with Cloudflare Access in front of it.
+
+Supported path:
+
+1. Run the desktop app on the Windows machine.
+2. Enable remote access in the dashboard so the local radio surface is served from `http://localhost:3443/radio`.
+3. Put a named Cloudflare Tunnel in front of that local origin.
+4. Protect the public hostname with Cloudflare Access.
+5. Use either the browser radio UI or the companion mobile app against that same tunnel hostname.
+
+The mobile app lives in [remote-coder/README.md](/C:/Users/coler/Desktop/Backup/development/Siylo/remote-coder/README.md). It does not replace the desktop app. It talks to the same PC-side Siylo backend through the Cloudflare Tunnel URL and reuses the existing remote routes.
+
+For the full tunnel setup, see [docs/remote-access-tunnel.md](/C:/Users/coler/Desktop/Backup/development/Siylo/docs/remote-access-tunnel.md).
 
 ## Configuration
 
