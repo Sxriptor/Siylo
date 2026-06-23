@@ -1,54 +1,88 @@
 # Siylo
 
-Siylo is a tray-first Electron desktop app with a Next.js dashboard and a Discord bot bridge for controlling a local Windows machine.
+Siylo is a local-first remote computer control platform built around a Windows desktop agent, a secure Cloudflare Tunnel web interface, and a companion mobile app.
+
+The desktop app runs in the system tray and manages terminal sessions, screenshots, application launching, and remote control of the local machine. Remote access is provided through a Cloudflare Tunnel, allowing the browser dashboard and mobile app to securely connect to the PC from anywhere.
+
+Discord integration is also available as an optional control surface for users who want to manage their machine through bot commands.
 
 The current build focuses on a small working surface:
 
-- connect and disconnect a Discord bot
-- store a bot token and authorized Discord user IDs locally
-- create and track managed `cmd` and `powershell` sessions
-- send quoted commands to those managed sessions
-- bring a managed session window to the foreground
-- kill one managed session or all managed sessions
-- capture and return a desktop screenshot
-- launch a few mapped apps such as `cursor` and `vscode`
-- inspect recent runtime logs from Discord
-- expose the radio remote surface through a named Cloudflare Tunnel
-- support the companion mobile app over that same tunnel URL
+* connect to a local Windows machine through a secure Cloudflare Tunnel
+* access the remote dashboard from any browser
+* control the machine through the companion mobile app
+* optionally connect and disconnect a Discord bot
+* store bot tokens and authorized Discord user IDs locally
+* create and track managed `cmd` and `powershell` sessions
+* send quoted commands to managed sessions
+* bring a managed session window to the foreground
+* kill one managed session or all managed sessions
+* capture and return desktop screenshots
+* launch mapped applications such as Cursor and VS Code
+* inspect recent runtime logs
+* expose the remote radio interface through a named Cloudflare Tunnel
 
 ## Stack
 
-- Electron for the desktop shell and tray integration
-- Next.js 15 and React 19 for the dashboard UI
-- `discord.js` for bot connectivity
-- `screenshot-desktop` for screenshot capture
+* Electron for the desktop shell and tray integration
+* Next.js 15 and React 19 for the dashboard UI
+* Cloudflare Tunnel for secure remote connectivity
+* Expo React Native for the companion mobile app
+* `discord.js` for optional Discord integration
+* `screenshot-desktop` for screenshot capture
 
 ## Current Architecture
 
-The app has two parts:
+Siylo consists of three primary components:
 
-1. Electron main process in [src/main/index.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/index.js)
-2. Next.js dashboard in [src/app/page.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/app/page.tsx)
+### 1. Desktop Agent
 
-Electron owns the real runtime:
+Electron desktop application running on the Windows machine.
 
-- tray menu
-- Discord connection lifecycle
-- local config persistence
-- managed terminal sessions
-- IPC bridge exposed from [src/main/preload.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/preload.js)
+Responsible for:
 
-The dashboard in [src/components/dashboard-shell.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components/dashboard-shell.tsx) shows live state when running inside Electron and falls back to preview data in a normal browser tab.
+* tray integration
+* local configuration
+* terminal session management
+* application launching
+* screenshot capture
+* remote command execution
+* IPC bridge exposed through `src/main/preload.js`
+
+### 2. Remote Dashboard
+
+Next.js dashboard used locally or remotely through Cloudflare Tunnel.
+
+Responsible for:
+
+* machine status
+* session management
+* configuration
+* logs
+* remote controls
+* mobile-friendly browser interface
+
+### 3. Companion Mobile App
+
+Expo-based iOS and Android app that connects to the same Siylo backend through Cloudflare Tunnel.
+
+The mobile app does not replace the desktop agent. It acts as a portable remote control surface that communicates with the PC through the same remote APIs used by the web dashboard.
+
+### Optional: Discord Bridge
+
+Discord remains supported as an additional control interface.
+
+Users can issue commands through Discord DMs, mentions, or configured prefixes while continuing to use the dashboard and mobile app as primary control surfaces.
 
 ## Platform Assumptions
 
 This implementation is currently Windows-oriented.
 
-- managed sessions use PowerShell automation and `WScript.Shell`
-- shell launching assumes `cmd.exe` and `powershell.exe`
-- app launching uses Windows `start`
+* managed sessions use PowerShell automation and `WScript.Shell`
+* shell launching assumes `cmd.exe` and `powershell.exe`
+* app launching uses Windows `start`
 
-Running the UI in a browser works cross-platform as a preview, but the desktop automation features are implemented for Windows.
+The dashboard and mobile app work cross-platform, but machine automation features currently target Windows.
 
 ## Local Development
 
@@ -82,77 +116,114 @@ Type-check the project:
 npm run typecheck
 ```
 
-## Remote Access And Mobile App
+## Remote Access
 
-Siylo now supports a remote radio surface that stays local on the PC and is meant to be published only through a named Cloudflare Tunnel with Cloudflare Access in front of it.
+Remote access is the primary Siylo workflow.
 
-Supported path:
+The desktop app hosts local services that are published securely through Cloudflare Tunnel.
 
-1. Run the desktop app on the Windows machine.
-2. Enable remote access in the dashboard so the local radio surface is served from `http://localhost:3443/radio`.
-3. Put a named Cloudflare Tunnel in front of that local origin.
+Typical setup:
+
+1. Install and run Siylo on the Windows machine.
+2. Enable remote access in the dashboard.
+3. Configure a named Cloudflare Tunnel.
 4. Protect the public hostname with Cloudflare Access.
-5. Use either the browser radio UI or the companion mobile app against that same tunnel hostname.
+5. Connect using:
 
-The mobile app lives in [remote-coder/README.md](/C:/Users/coler/Desktop/Backup/development/Siylo/remote-coder/README.md). It does not replace the desktop app. It talks to the same PC-side Siylo backend through the Cloudflare Tunnel URL and reuses the existing remote routes.
+   * the browser dashboard
+   * the mobile app
+   * optional Discord commands
 
-For the full tunnel setup, see [docs/remote-access-tunnel.md](/C:/Users/coler/Desktop/Backup/development/Siylo/docs/remote-access-tunnel.md).
+This allows secure access to the machine without opening ports or exposing local services directly to the internet.
+
+For setup instructions see:
+
+`docs/remote-access-tunnel.md`
+
+## Mobile App
+
+The companion mobile app lives in:
+
+`remote-coder/README.md`
+
+Features include:
+
+* remote terminal controls
+* push-to-talk style interactions
+* dashboard access
+* screenshot viewing
+* machine status monitoring
+* quick command execution
+
+The mobile app communicates with the same Siylo backend through the Cloudflare Tunnel URL and reuses the existing remote APIs.
 
 ## Configuration
 
-Siylo stores config in Electron `userData` as `siylo.config.json`.
+Siylo stores config in Electron `userData` as:
+
+`siylo.config.json`
 
 Tracked settings:
 
-- `botToken`
-- `authorizedUsers`
-- `dashboardPort`
-- `autoConnect`
-- `commandPrefix`
+* `botToken`
+* `authorizedUsers`
+* `dashboardPort`
+* `autoConnect`
+* `commandPrefix`
 
-The dashboard currently allows editing the bot token and authorized Discord user IDs. `dashboardPort` and `commandPrefix` exist in state, but the UI does not yet expose full editing controls for them.
+The dashboard currently exposes bot token and authorized user management. Additional configuration controls are planned.
 
 ## Tray Behavior
 
 When the app starts, Electron creates:
 
-- a hidden main window
-- a tray icon
-- a tray menu with `Start`, `Stop`, `Settings`, `Open Dashboard`, and `Quit`
+* a hidden main window
+* a tray icon
+* a tray menu with:
 
-In development, the window is shown automatically once the renderer is ready. In normal use, the app is intended to stay in the tray until opened.
+  * Start
+  * Stop
+  * Settings
+  * Open Dashboard
+  * Quit
 
-## Discord Command Handling
+The intended workflow is for Siylo to remain running in the tray while providing remote access through the dashboard, mobile app, and optional Discord integration.
 
-Commands are accepted from:
+## Discord Integration
 
-- DMs to the bot
-- messages that mention the bot user
-- messages that mention one of the bot's roles
-- messages that start with the configured prefix, which defaults to `@siylo`
+Discord support remains available but is no longer the primary control path.
 
-Only Discord user IDs listed in `authorizedUsers` are allowed to execute commands.
+Commands can be accepted from:
 
-## Supported Commands
+* direct messages
+* bot mentions
+* role mentions
+* configured command prefixes
 
-Implemented command set in [src/main/discord-service.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/discord-service.js):
+Only user IDs listed in `authorizedUsers` are allowed to execute commands.
 
-- `list`
-- `logs`
-- `screenshot`
-- `restart`
-- `open cmd`
-- `open powershell`
-- `open cursor`
-- `open vscode`
-- `open kiro`
-- `open browser`
-- `kill all`
-- `kill <session-id>`
-- `<session-id> front`
-- `<session-id> k <key>`
-- `<session-id> t <raw text>`
-- `<session-id> "your command here"`
+### Supported Commands
+
+Implemented in:
+
+`src/main/discord-service.js`
+
+* `list`
+* `logs`
+* `screenshot`
+* `restart`
+* `open cmd`
+* `open powershell`
+* `open cursor`
+* `open vscode`
+* `open kiro`
+* `open browser`
+* `kill all`
+* `kill <session-id>`
+* `<session-id> front`
+* `<session-id> k <key>`
+* `<session-id> t <raw text>`
+* `<session-id> "your command here"`
 
 Examples:
 
@@ -167,56 +238,65 @@ Examples:
 @siylo screenshot
 ```
 
-The `t` format forwards everything after `t ` as raw text, including embedded quotes, and always presses Enter after typing it.
-
 ## Managed Sessions
 
-Managed sessions are implemented in [src/main/session-manager.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/session-manager.js).
+Managed sessions are implemented in:
+
+`src/main/session-manager.js`
 
 Current behavior:
 
-- only `cmd` and `powershell` are treated as managed sessions
-- sessions are assigned IDs like `cmd-1` and `powershell-1`
-- the app tracks session metadata in memory
-- commands are sent by bringing the terminal window forward and using simulated keystrokes
+* only `cmd` and `powershell` are managed sessions
+* sessions receive IDs such as `cmd-1` and `powershell-1`
+* session metadata is tracked in memory
+* commands are executed by bringing windows forward and sending keystrokes
 
-This means Siylo is not attaching to a PTY or streaming terminal output back to Discord. It automates visible shell windows on the local machine.
+Siylo currently automates visible terminal windows rather than attaching to PTYs or streaming terminal output.
 
 ## Logging and State
 
-Runtime state is held in [src/main/state.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/state.js).
+Runtime state is managed in:
 
-The app keeps:
+`src/main/state.js`
 
-- Discord connection status
-- current config snapshot
-- up to 10 recent sessions
-- up to 100 recent log entries
+Stored information includes:
 
-`logs` in Discord returns the most recent entries from this in-memory log buffer.
+* connection status
+* configuration snapshot
+* recent sessions
+* recent logs
 
-## Browser Preview vs Electron Runtime
+The dashboard, mobile app, and Discord integration all consume the same underlying runtime state.
 
-Opening the Next.js app directly in a browser shows the dashboard with fallback sample data. Live controls only work when the page is loaded inside Electron with the preload bridge available.
+## Browser Preview vs Runtime
 
-The `Create session` button in the dashboard currently uses a simulated session path for UI feedback. Real managed session creation is implemented through Discord commands.
+Opening the Next.js application directly in a browser shows preview data.
+
+Full functionality is available when connected to a running Siylo desktop agent either:
+
+* locally
+* through Cloudflare Tunnel
+* through the mobile app
 
 ## Current Limitations
 
-- no packaging or installer flow yet
-- no database; config and runtime state are local only
-- no terminal output capture or live command streaming
-- no file browser or remote file editing
-- no granular permission model beyond authorized Discord IDs
-- no tests are included yet
+* no installer or packaging flow yet
+* no database
+* config and runtime state remain local
+* no terminal output streaming
+* no remote file editing
+* limited permissions model
+* no automated tests yet
 
 ## Repo Layout
 
-- [src/app](/C:/Users/coler/Desktop/Backup/development/Siylo/src/app) contains the Next.js app shell
-- [src/components](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components) contains the dashboard UI
-- [src/main](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main) contains Electron, Discord, state, and session logic
-- [scripts](/C:/Users/coler/Desktop/Backup/development/Siylo/scripts) contains dev/start launch scripts
+* `src/app` — Next.js application
+* `src/components` — dashboard UI components
+* `src/main` — Electron runtime and machine automation
+* `remote-coder` — companion mobile application
+* `scripts` — development and startup scripts
+* `docs` — deployment and remote access documentation
 
 ## Status
 
-This repo is currently an early local-first prototype. The implemented path is strongest around tray control, Discord connectivity, Windows shell automation, screenshots, and a small dashboard for local configuration.
+Siylo is currently an early local-first prototype focused on secure remote access to a Windows machine through Cloudflare Tunnel. The strongest implemented workflows today are browser-based remote control, mobile access, Windows shell automation, screenshots, tray management, and optional Discord-based control.
