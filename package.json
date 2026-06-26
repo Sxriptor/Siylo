@@ -11,6 +11,8 @@
     "dist": "npm run build && electron-builder --win nsis",
     "release:win": "npm run build && electron-builder --win nsis --publish always",
     "start": "node scripts/start.mjs",
+    "start:cli": "node src/cli/index.js",
+    "init:cli": "node src/cli/index.js init",
     "start:renderer": "next start --hostname 0.0.0.0 --port 3000",
     "typecheck": "next typegen && tsc --noEmit"
   },

@@ -1,0 +1,35 @@
+{
+  "name": "siylo",
+  "version": "1.0.5",
+  "private": false,
+  "description": "Local Windows automation agent with a bundled radio web UI and terminal dashboard.",
+  "bin": {
+    "siylo": "./bin/siylo.js"
+  },
+  "main": "./src/cli/index.js",
+  "scripts": {
+    "start": "node ./bin/siylo.js",
+    "init": "node ./bin/siylo.js init"
+  },
+  "files": [
+    "bin",
+    "src",
+    "public",
+    "out",
+    "README.md"
+  ],
+  "dependencies": {
+    "discord.js": "^14.19.3",
+    "node-pty": "^1.1.0",
+    "screenshot-desktop": "^1.15.3"
+  },
+  "keywords": [
+    "discord",
+    "radio",
+    "automation",
+    "windows",
+    "cli"
+  ],
+  "author": "Sxriptor",
+  "license": "UNLICENSED"
+}

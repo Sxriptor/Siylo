@@ -1,6 +1,6 @@
 # Siylo
 
-Siylo is a tray-first Electron desktop app with a Next.js dashboard and a Discord bot bridge for controlling a local Windows machine.
+Siylo is a local Windows automation agent with a bundled radio web UI, a terminal control surface, and a Discord bot bridge for controlling a local machine.
 
 The current build focuses on a small working surface:
 
@@ -13,32 +13,33 @@ The current build focuses on a small working surface:
 - capture and return a desktop screenshot
 - launch a few mapped apps such as `cursor` and `vscode`
 - inspect recent runtime logs from Discord
-- expose the radio remote surface through a named Cloudflare Tunnel
+- expose the bundled radio remote surface through a named Cloudflare Tunnel
 - support the companion mobile app over that same tunnel URL
+- configure the local runtime from a terminal dashboard with `siylo`
 
 ## Stack
 
-- Electron for the desktop shell and tray integration
+- Node.js for the local agent runtime
 - Next.js 15 and React 19 for the dashboard UI
 - `discord.js` for bot connectivity
 - `screenshot-desktop` for screenshot capture
 
 ## Current Architecture
 
-The app has two parts:
+The app now has two primary parts:
 
-1. Electron main process in [src/main/index.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/index.js)
-2. Next.js dashboard in [src/app/page.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/app/page.tsx)
+1. Local agent runtime in [src/main/runtime.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/runtime.js)
+2. Bundled radio UI in [src/components/radio-shell.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components/radio-shell.tsx)
 
-Electron owns the real runtime:
+The local runtime owns the real machine-facing behavior:
 
-- tray menu
+- terminal control surface
 - Discord connection lifecycle
 - local config persistence
 - managed terminal sessions
-- IPC bridge exposed from [src/main/preload.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/main/preload.js)
+- radio HTTP surface and local APIs
 
-The dashboard in [src/components/dashboard-shell.tsx](/C:/Users/coler/Desktop/Backup/development/Siylo/src/components/dashboard-shell.tsx) shows live state when running inside Electron and falls back to preview data in a normal browser tab.
+The CLI entrypoint lives in [src/cli/index.js](/C:/Users/coler/Desktop/Backup/development/Siylo/src/cli/index.js) and is intended to be the main user-facing control surface.
 
 ## Platform Assumptions
 
@@ -58,22 +59,28 @@ Install dependencies:
 npm install
 ```
 
-Run the Next.js renderer and Electron together:
+Open the terminal control dashboard:
 
 ```bash
-npm run dev
+npm run start:cli
 ```
 
-Build the renderer:
+Initialize or update config interactively:
+
+```bash
+npm run init:cli
+```
+
+Build the bundled radio UI:
 
 ```bash
 npm run build
 ```
 
-Start Electron against the built renderer:
+Run the agent headlessly:
 
 ```bash
-npm start
+node src/cli/index.js start
 ```
 
 Type-check the project:
