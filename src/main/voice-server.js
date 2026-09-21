@@ -516,7 +516,12 @@ function formatError(error) {
   return String(error);
 }
 
+function isVoiceServerListening() {
+  return voiceServer !== null && voiceServer.listening;
+}
+
 module.exports = {
+  isVoiceServerListening,
   startVoiceServer,
   stopVoiceServer
 };

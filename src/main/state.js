@@ -60,6 +60,8 @@ function createLog(level, message) {
 
 function appendLog(level, message) {
   state.logs = [createLog(level, message), ...state.logs].slice(0, 100);
+  const logMethod = level === "error" ? "error" : level === "warn" ? "warn" : "log";
+  console[logMethod](`[${level}] ${message}`);
   return state.logs[0];
 }
 

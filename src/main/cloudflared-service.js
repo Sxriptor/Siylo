@@ -1,4 +1,5 @@
 const fs = require("node:fs");
+const path = require("node:path");
 const { spawn } = require("node:child_process");
 const { appendLog, setRemoteAccessState } = require("./state");
 
@@ -6,6 +7,7 @@ const defaultTunnelName = "siylo-radio";
 const startupGraceMs = 1200;
 const cloudflaredCandidates = [
   process.env.CLOUDFLARED_PATH || "",
+  process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, "cloudflared", "cloudflared.exe") : "",
   "C:\\Program Files\\cloudflared\\cloudflared.exe",
   "C:\\Program Files (x86)\\cloudflared\\cloudflared.exe"
 ];
@@ -144,9 +146,38 @@ function resolveCloudflaredExecutable() {
     }
   }
 
+  const pathExecutable = resolveExecutableFromPath("cloudflared.exe");
+  if (pathExecutable) {
+    return pathExecutable;
+  }
+
   throw new Error(
     "cloudflared.exe was not found. Install Cloudflare Tunnel or set CLOUDFLARED_PATH to the executable."
   );
+}
+
+function resolveExecutableFromPath(executableName) {
+  const pathValue = process.env.PATH || "";
+  const pathExts = (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(";");
+  const namesToCheck = path.extname(executableName)
+    ? [executableName]
+    : pathExts.map((extension) => `${executableName}${extension}`);
+
+  for (const directory of pathValue.split(path.delimiter)) {
+    const normalizedDirectory = String(directory || "").trim();
+    if (!normalizedDirectory) {
+      continue;
+    }
+
+    for (const name of namesToCheck) {
+      const candidate = path.join(normalizedDirectory, name);
+      if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    }
+  }
+
+  return null;
 }
 
 function delay(ms) {

@@ -9,12 +9,14 @@
     "dev:renderer": "next dev --hostname 0.0.0.0 --port 3000",
     "build": "next build",
     "dist": "npm run build && electron-builder --win nsis",
+    "dist:win": "npm run build && electron-builder --win nsis",
     "release:win": "npm run build && electron-builder --win nsis --publish always",
     "start": "node scripts/start.mjs",
     "start:renderer": "next start --hostname 0.0.0.0 --port 3000",
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "discord-api-types": "0.38.33",
     "discord.js": "^14.19.3",
     "electron-updater": "^6.8.3",
     "next": "^15.2.0",
@@ -42,10 +44,13 @@
       "src/main/**/*",
       "public/**/*",
       "out/**/*",
+      "node_modules/discord-api-types/rest/**/*",
+      "node_modules/discord-api-types/_generated_/**/*",
       "package.json"
     ],
     "win": {
       "icon": "public/logo.ico",
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",

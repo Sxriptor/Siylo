@@ -82,7 +82,16 @@ function decryptSecret(secret) {
     serializedSecret.slice(encryptedSecretPrefix.length),
     "base64"
   );
-  return safeStorage.decryptString(encryptedBuffer);
+
+  try {
+    return safeStorage.decryptString(encryptedBuffer);
+  } catch (error) {
+    console.warn(
+      "Failed to decrypt a saved Siylo secret. Clear and save the key again in Settings if this integration is still needed.",
+      error
+    );
+    return "";
+  }
 }
 
 function coercePort(value, fallback) {

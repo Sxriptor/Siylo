@@ -1119,13 +1119,21 @@ export function RadioShell() {
     setIsLauncherOpen(false);
     setStatus("processing");
 
-    if (!voiceApiBase) {
-      setStatus("error");
-      return;
-    }
-
     try {
-      const response = await fetch(`${voiceApiBase}/voice`, {
+      let resolvedVoiceApiBase = voiceApiBase;
+      if (!resolvedVoiceApiBase) {
+        const health = await probeVoiceBackend();
+        resolvedVoiceApiBase = health?.baseUrl || "";
+        if (resolvedVoiceApiBase) {
+          setVoiceApiBase(resolvedVoiceApiBase);
+        }
+      }
+
+      if (!resolvedVoiceApiBase) {
+        throw new Error("Voice backend unavailable.");
+      }
+
+      const response = await fetch(`${resolvedVoiceApiBase}/voice`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
@@ -1140,9 +1148,11 @@ export function RadioShell() {
         throw new Error(payload?.error || `Open request failed with ${response.status}.`);
       }
 
+      console.info(`[radio] open ${target} ->`, payload);
       applyVoicePayload(payload);
       setStatus("executed");
-    } catch {
+    } catch (error) {
+      console.error(`[radio] open ${target} failed:`, error);
       setStatus("error");
     }
   }

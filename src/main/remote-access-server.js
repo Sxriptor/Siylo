@@ -9,6 +9,10 @@ const {
   getStateSnapshot,
   setRemoteAccessState
 } = require("./state");
+const {
+  isVoiceServerListening,
+  startVoiceServer
+} = require("./voice-server");
 
 let remoteAccessServer = null;
 let currentOptions = null;
@@ -46,7 +50,7 @@ async function startRemoteAccessServer(options = {}) {
       handleRemoteAccessRequest(request, response).catch((error) => {
         appendLog("error", `Remote access request failed: ${formatError(error)}`);
         if (!response.headersSent && !response.destroyed) {
-          sendText(response, 500, "Remote access request failed.");
+          sendText(response, 500, `Remote access request failed: ${formatError(error)}`);
         }
       });
     });
@@ -168,6 +172,7 @@ async function handleRemoteAccessRequest(request, response) {
     requestUrl.pathname.startsWith("/desktop/") ||
     requestUrl.pathname.startsWith("/sessions/")
   ) {
+    await ensureVoiceBackend();
     await proxyRequest(request, response, buildVoiceProxyUrl(requestUrl));
     return;
   }
@@ -183,6 +188,15 @@ async function handleRemoteAccessRequest(request, response) {
 function buildVoiceProxyUrl(requestUrl) {
   const voicePort = Number(getStateSnapshot().voice.port || getConfig().voiceServerPort || 3210);
   return new URL(`${requestUrl.pathname}${requestUrl.search}`, `http://127.0.0.1:${voicePort}`);
+}
+
+async function ensureVoiceBackend() {
+  if (isVoiceServerListening()) {
+    return;
+  }
+
+  appendLog("warn", "Voice backend was not listening for remote access; starting it now.");
+  await startVoiceServer();
 }
 
 function buildRendererProxyUrl(requestUrl) {
