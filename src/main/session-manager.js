@@ -196,13 +196,17 @@ async function sendTextToSession(sessionId, commandText, options = {}) {
 
   const text = String(commandText || "");
   const pressEnter = options.pressEnter !== false;
+  // TUIs such as Codex enable bracketed paste and treat a fast burst of
+  // characters as a paste, swallowing an Enter that arrives too soon after it.
+  // Send the text as a real paste in that case and press Enter separately.
+  const usesBracketedPaste = Boolean(runtime.terminal.modes?.bracketedPasteMode);
   if (text) {
-    runtime.process.write(text);
+    runtime.process.write(usesBracketedPaste ? `\u001b[200~${text}\u001b[201~` : text);
   }
 
   if (pressEnter) {
     if (text) {
-      await delay(60);
+      await delay(usesBracketedPaste ? 220 : 60);
     }
     runtime.process.write("\r");
     markSessionSubmitted(runtime, text);
@@ -528,7 +532,8 @@ function isTerminalChromeLine(line) {
     /^[⚠⏵✻✶✳✢·*]/.test(value) ||
     /^[›❯]\s+(Try "|Ask Codex)/.test(value) ||
     /\b(esc to interrupt|\? for shortcuts|shift\+tab to cycle|for agents)\b/i.test(value) ||
-    /^gpt-[\w.-]+\s/i.test(value)
+    /^gpt-[\w.-]+\s/i.test(value) ||
+    /^(worked|brewed|cooked|churned|thought) for \d/i.test(value)
   );
 }
 
