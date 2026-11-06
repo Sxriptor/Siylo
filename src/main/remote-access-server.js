@@ -170,6 +170,7 @@ async function handleRemoteAccessRequest(request, response) {
     requestUrl.pathname === "/tts" ||
     requestUrl.pathname === "/voice" ||
     requestUrl.pathname.startsWith("/desktop/") ||
+    requestUrl.pathname.startsWith("/push/") ||
     requestUrl.pathname.startsWith("/sessions/")
   ) {
     await ensureVoiceBackend();
@@ -249,7 +250,7 @@ async function serveStaticRequest(request, response, requestUrl) {
   const contentType = getContentType(filePath);
   response.writeHead(200, {
     "Content-Type": contentType,
-    "Cache-Control": filePath.endsWith(".html") ? "no-cache" : "public, max-age=300"
+    "Cache-Control": resolveStaticCacheControl(filePath)
   });
 
   if (String(request.method || "GET").toUpperCase() === "HEAD") {
@@ -258,6 +259,19 @@ async function serveStaticRequest(request, response, requestUrl) {
   }
 
   fs.createReadStream(filePath).pipe(response);
+}
+
+function resolveStaticCacheControl(filePath) {
+  const normalized = filePath.split(path.sep).join("/");
+  if (normalized.endsWith(".html") || normalized.endsWith("/sw.js") || normalized.endsWith(".webmanifest")) {
+    return "no-cache";
+  }
+
+  if (normalized.includes("/_next/static/")) {
+    return "public, max-age=31536000, immutable";
+  }
+
+  return "public, max-age=300";
 }
 
 function serveNextAssetFallback(request, response, requestPathname) {

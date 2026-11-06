@@ -1,16 +1,36 @@
 "use client";
 
 import type { Dispatch, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
 
 const DEFAULT_SESSION_IDS = ["cmd-1", "cmd-2", "cursor", "codex"];
 const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
+const TERMINAL_LAUNCHER_TARGETS = new Set(["cmd", "powershell", "codex"]);
 const SESSION_STORAGE_KEY = "siylo-radio-session-id";
 const SPEECH_VOLUME_STORAGE_KEY = "siylo-radio-speech-volume";
+const SPEAK_RESULTS_STORAGE_KEY = "siylo-radio-speak-results";
+const FONT_SIZE_STORAGE_KEY = "siylo-radio-terminal-font";
+const FIT_WIDTH_STORAGE_KEY = "siylo-radio-fit-width";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
-const SESSION_POLL_INTERVAL_MS = 900;
+const SESSION_POLL_INTERVAL_MS = 650;
+const STATUS_POLL_INTERVAL_MS = 1500;
+const TOAST_DURATION_MS = 7000;
+const MIN_TERMINAL_FONT = 10;
+const MAX_TERMINAL_FONT = 20;
+const DEFAULT_TERMINAL_FONT = 13;
+const TERMINAL_KEYS: Array<{ key: string; label: string; aria: string }> = [
+  { key: "ctrl+c", label: "Ctrl+C", aria: "Send Ctrl+C (stop)" },
+  { key: "esc", label: "Esc", aria: "Send Escape" },
+  { key: "tab", label: "Tab", aria: "Send Tab" },
+  { key: "up", label: "↑", aria: "Send arrow up" },
+  { key: "down", label: "↓", aria: "Send arrow down" },
+  { key: "left", label: "←", aria: "Send arrow left" },
+  { key: "right", label: "→", aria: "Send arrow right" },
+  { key: "y", label: "y", aria: "Send the letter y" },
+  { key: "n", label: "n", aria: "Send the letter n" }
+];
 const PENDING_SESSION_GRACE_MS = 5000;
 const MIN_AUDIBLE_PEAK = 0.015;
 const MIN_AUDIBLE_RMS = 0.003;
@@ -31,15 +51,64 @@ type VoiceResponse = {
 };
 
 type SessionStreamResponse = {
+  activity?: string;
   error?: string;
   inputAvailable?: boolean;
   isBusy?: boolean;
   message?: string;
+  missing?: boolean;
   output?: string;
   outputAvailable?: boolean;
+  runStartedAt?: number;
   sessionId?: string;
   status?: string;
+  unchanged?: boolean;
+  version?: number;
+  waitingForInput?: boolean;
 };
+
+type SessionStatus = {
+  id: string;
+  shell?: string;
+  activity?: "idle" | "running" | "app" | string;
+  isBusy?: boolean;
+  lastCommand?: string;
+  lastFinishedAt?: number;
+  lastEventKind?: string;
+  lastLine?: string;
+  runStartedAt?: number;
+  version?: number;
+  waitingForInput?: boolean;
+};
+
+type SessionEvent = {
+  sessionId: string;
+  kind: "finished" | "input" | "stopped" | "exited" | string;
+  durationMs?: number;
+  command?: string;
+  summary?: string;
+  at?: number;
+  seq: number;
+};
+
+type StatusResponse = {
+  status?: string;
+  now?: number;
+  sessions?: SessionStatus[];
+  events?: SessionEvent[];
+  seq?: number;
+};
+
+type ToastEntry = {
+  id: number;
+  sessionId: string;
+  kind: string;
+  title: string;
+  body: string;
+};
+
+type ConnectionState = "connecting" | "online" | "offline";
+type PushState = "unknown" | "unsupported" | "needs-install" | "denied" | "off" | "on" | "working";
 
 type DesktopFrameState = {
   screenWidth: number;
@@ -69,7 +138,20 @@ export function RadioShell() {
   const [isLauncherOpen, setIsLauncherOpen] = useState(false);
   const [inspectorSessionId, setInspectorSessionId] = useState<string | null>(null);
   const [sessionStream, setSessionStream] = useState<SessionStreamResponse | null>(null);
-  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [sessionStatuses, setSessionStatuses] = useState<Record<string, SessionStatus>>({});
+  const [unreadSessions, setUnreadSessions] = useState<Record<string, string>>({});
+  const [toasts, setToasts] = useState<ToastEntry[]>([]);
+  const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const [clockNow, setClockNow] = useState(() => Date.now());
+  const [serverClockOffset, setServerClockOffset] = useState(0);
+  const [speakResults, setSpeakResults] = useState(true);
+  const [terminalFontSize, setTerminalFontSize] = useState(DEFAULT_TERMINAL_FONT);
+  const [fitTerminalWidth, setFitTerminalWidth] = useState(true);
+  const [isInspectorMenuOpen, setIsInspectorMenuOpen] = useState(false);
+  const [isConfirmingKill, setIsConfirmingKill] = useState(false);
+  const [isOutputPinnedToBottom, setIsOutputPinnedToBottom] = useState(true);
+  const [pushState, setPushState] = useState<PushState>("unknown");
+  const [pushMessage, setPushMessage] = useState("");
   const [terminalInput, setTerminalInput] = useState("");
   const [isSendingTerminalInput, setIsSendingTerminalInput] = useState(false);
   const [isSpeakingOutput, setIsSpeakingOutput] = useState(false);
@@ -105,6 +187,16 @@ export function RadioShell() {
   const activeSessionIdRef = useRef(currentSessionId);
   const sessionIdsRef = useRef(sessionIds);
   const terminalInputRef = useRef<HTMLInputElement | null>(null);
+  const outputPanelRef = useRef<HTMLPreElement | null>(null);
+  const charMeasureRef = useRef<HTMLSpanElement | null>(null);
+  const pinnedToBottomRef = useRef(true);
+  const lastEventSeqRef = useRef<number | null>(null);
+  const toastIdRef = useRef(0);
+  const sessionStreamVersionRef = useRef<number | null>(null);
+  const speakResultsRef = useRef(true);
+  const hasBeenOnlineRef = useRef(false);
+  const lastResizeRef = useRef<string>("");
+  const suppressGhostClickUntilRef = useRef(0);
   const confirmedSessionIdsRef = useRef<string[]>([]);
   const pendingSessionTimeoutsRef = useRef<Record<string, number>>({});
   const desktopPointerSendRef = useRef(0);
@@ -137,7 +229,12 @@ export function RadioShell() {
   const isBusy = status === "processing";
   const isListening = status === "listening";
   const sessionSlots = useMemo(() => buildSessionSlots(sessionIds), [sessionIds]);
-  const inspectorStatusLabel = getInspectorStatusLabel(sessionStream);
+  const inspectorStatus = getInspectorStatus(sessionStream, isSendingTerminalInput);
+  const inspectorElapsed =
+    sessionStream?.isBusy && sessionStream.runStartedAt
+      ? formatElapsed(clockNow + serverClockOffset - sessionStream.runStartedAt)
+      : "";
+  const terminalInputAvailable = Boolean(sessionStream?.inputAvailable) && !sessionStream?.missing;
   const viewerZoomPercent = Math.round(viewerZoom * 100);
   const desktopStreamUrl = voiceApiBase ? `${voiceApiBase}/desktop/stream?fps=5` : "";
   const desktopViewerImageUrl = viewerStreamStatus === "fallback" ? viewerFallbackImageUrl : desktopStreamUrl;
@@ -161,7 +258,8 @@ export function RadioShell() {
   }, []);
 
   useEffect(() => {
-    const storedSpeechVolume = Number(window.localStorage.getItem(SPEECH_VOLUME_STORAGE_KEY));
+    const storedSpeechVolumeRaw = window.localStorage.getItem(SPEECH_VOLUME_STORAGE_KEY);
+    const storedSpeechVolume = storedSpeechVolumeRaw === null ? NaN : Number(storedSpeechVolumeRaw);
     if (Number.isFinite(storedSpeechVolume)) {
       const nextVolume = clampRatio(storedSpeechVolume);
       speechVolumeRef.current = nextVolume;
@@ -226,9 +324,12 @@ export function RadioShell() {
       return;
     }
 
-    navigator.serviceWorker.register("/sw.js").catch(() => {
-      // Registration failure should not block the radio flow.
-    });
+    navigator.serviceWorker
+      .register("/sw.js", { updateViaCache: "none" })
+      .then((registration) => registration.update().catch(() => undefined))
+      .catch(() => {
+        // Registration failure should not block the radio flow.
+      });
   }, []);
 
   useEffect(() => {
@@ -283,19 +384,11 @@ export function RadioShell() {
 
   useEffect(() => {
     let cancelled = false;
+    let timeoutId: number | null = null;
+    let failureCount = 0;
 
-    async function refreshHealth() {
-      const health = await probeVoiceBackend();
-      if (cancelled) {
-        return;
-      }
-
-      if (!health) {
-        setVoiceApiBase("");
-        return;
-      }
-
-      const confirmedSessionIds = mergeSessionIds(health.payload.sessions?.map((session) => session.id) || []);
+    function applyConfirmedSessions(sessionList: string[]) {
+      const confirmedSessionIds = mergeSessionIds(sessionList);
       confirmedSessionIdsRef.current = confirmedSessionIds;
       clearConfirmedPendingSessionTimeouts(confirmedSessionIds, pendingSessionTimeoutsRef.current);
       const visibleSessionIds = sessionIdsRef.current;
@@ -304,20 +397,248 @@ export function RadioShell() {
           ensureSessionGraceTimeout(sessionId, pendingSessionTimeoutsRef, confirmedSessionIdsRef, setSessionIds);
         }
       }
-      setVoiceApiBase(health.baseUrl);
       setSessionIds(mergeSessionIds([...confirmedSessionIds, ...visibleSessionIds]));
     }
 
-    void refreshHealth();
-    const intervalId = window.setInterval(() => {
-      void refreshHealth();
-    }, 5000);
+    function markOnline() {
+      failureCount = 0;
+      hasBeenOnlineRef.current = true;
+      setConnectionState("online");
+    }
+
+    function markFailure() {
+      failureCount += 1;
+      if (failureCount >= 2 || !hasBeenOnlineRef.current) {
+        setConnectionState(hasBeenOnlineRef.current ? "offline" : "connecting");
+      }
+    }
+
+    async function pollStatus() {
+      let apiBase = voiceApiBaseRef.current;
+
+      if (!apiBase) {
+        const health = await probeVoiceBackend();
+        if (cancelled) {
+          return;
+        }
+
+        if (!health) {
+          markFailure();
+          return;
+        }
+
+        apiBase = health.baseUrl;
+        voiceApiBaseRef.current = apiBase;
+        setVoiceApiBase(apiBase);
+      }
+
+      try {
+        const params = new URLSearchParams({
+          since: String(lastEventSeqRef.current ?? 0),
+          visible: document.visibilityState === "visible" ? "1" : "0",
+          viewing: document.visibilityState === "visible" ? inspectorSessionIdRef.current || "" : ""
+        });
+        const response = await fetchWithTimeout(`${apiBase}/sessions/status?${params.toString()}`, 6000);
+        if (!response.ok) {
+          throw new Error(`Status failed with ${response.status}`);
+        }
+
+        const payload = await parseJsonResponse<StatusResponse>(response);
+        if (cancelled || !payload) {
+          return;
+        }
+
+        markOnline();
+        if (typeof payload.now === "number") {
+          setServerClockOffset(payload.now - Date.now());
+        }
+
+        const statuses = payload.sessions || [];
+        const nextStatuses: Record<string, SessionStatus> = {};
+        for (const entry of statuses) {
+          nextStatuses[String(entry.id).toLowerCase()] = entry;
+        }
+        setSessionStatuses(nextStatuses);
+        applyConfirmedSessions(statuses.map((entry) => entry.id));
+
+        const isFirstPoll = lastEventSeqRef.current === null;
+        lastEventSeqRef.current = Number(payload.seq || 0);
+        if (!isFirstPoll) {
+          for (const event of payload.events || []) {
+            handleSessionEvent(event);
+          }
+        }
+      } catch {
+        if (cancelled) {
+          return;
+        }
+
+        markFailure();
+        if (failureCount >= 3) {
+          // Force re-discovery: the tunnel URL or local port may have changed.
+          voiceApiBaseRef.current = "";
+          setVoiceApiBase("");
+        }
+      }
+    }
+
+    function scheduleNext() {
+      if (cancelled) {
+        return;
+      }
+
+      const delay = document.visibilityState === "visible" ? STATUS_POLL_INTERVAL_MS : 15000;
+      timeoutId = window.setTimeout(async () => {
+        await pollStatus();
+        scheduleNext();
+      }, failureCount > 0 ? Math.min(delay * (failureCount + 1), 8000) : delay);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      void pollStatus().then(scheduleNext);
+    }
+
+    void pollStatus().then(scheduleNext);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("online", handleVisibilityChange);
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("online", handleVisibilityChange);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const hasRunningSession = Object.values(sessionStatuses).some((entry) => entry.activity === "running");
+    if (!hasRunningSession && !sessionStream?.isBusy) {
+      return;
+    }
+
+    setClockNow(Date.now());
+    const intervalId = window.setInterval(() => setClockNow(Date.now()), 1000);
+    return () => window.clearInterval(intervalId);
+  }, [sessionStatuses, sessionStream?.isBusy]);
+
+  useEffect(() => {
+    speakResultsRef.current = speakResults;
+  }, [speakResults]);
+
+  useEffect(() => {
+    const storedSpeak = window.localStorage.getItem(SPEAK_RESULTS_STORAGE_KEY);
+    if (storedSpeak !== null) {
+      setSpeakResults(storedSpeak === "1");
+    }
+
+    const storedFont = Number(window.localStorage.getItem(FONT_SIZE_STORAGE_KEY));
+    if (Number.isFinite(storedFont) && storedFont >= MIN_TERMINAL_FONT && storedFont <= MAX_TERMINAL_FONT) {
+      setTerminalFontSize(storedFont);
+    }
+
+    const storedFit = window.localStorage.getItem(FIT_WIDTH_STORAGE_KEY);
+    if (storedFit !== null) {
+      setFitTerminalWidth(storedFit === "1");
+    }
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(SPEAK_RESULTS_STORAGE_KEY, speakResults ? "1" : "0");
+  }, [speakResults]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(terminalFontSize));
+  }, [terminalFontSize]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FIT_WIDTH_STORAGE_KEY, fitTerminalWidth ? "1" : "0");
+  }, [fitTerminalWidth]);
+
+  // Keep the layout pinned to the *visual* viewport so the on-screen keyboard
+  // never covers the command composer (iOS Safari does not resize fixed boxes).
+  useEffect(() => {
+    const visualViewport = window.visualViewport;
+    const root = document.documentElement;
+
+    function syncViewport() {
+      const height = visualViewport ? visualViewport.height : window.innerHeight;
+      const offsetTop = visualViewport ? visualViewport.offsetTop : 0;
+      root.style.setProperty("--radio-vh", `${Math.round(height)}px`);
+      root.style.setProperty("--radio-vtop", `${Math.round(offsetTop)}px`);
+      const keyboardOpen = window.innerHeight - height > 120;
+      root.dataset.radioKeyboard = keyboardOpen ? "open" : "closed";
+    }
+
+    syncViewport();
+    visualViewport?.addEventListener("resize", syncViewport);
+    visualViewport?.addEventListener("scroll", syncViewport);
+    window.addEventListener("resize", syncViewport);
+
+    return () => {
+      visualViewport?.removeEventListener("resize", syncViewport);
+      visualViewport?.removeEventListener("scroll", syncViewport);
+      window.removeEventListener("resize", syncViewport);
+      root.style.removeProperty("--radio-vh");
+      root.style.removeProperty("--radio-vtop");
+      delete root.dataset.radioKeyboard;
     };
   }, []);
+
+  // Deep link from a notification: /radio?session=cmd-1
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedSessionId = normalizeSessionId(params.get("session"));
+    if (requestedSessionId) {
+      openInspector(requestedSessionId);
+      params.delete("session");
+      const nextSearch = params.toString();
+      window.history.replaceState(null, "", `${window.location.pathname}${nextSearch ? `?${nextSearch}` : ""}`);
+    }
+
+    if (!("serviceWorker" in navigator)) {
+      return;
+    }
+
+    function handleServiceWorkerMessage(event: MessageEvent) {
+      const data = event.data as { type?: string; sessionId?: string } | null;
+      if (data?.type === "open-session" && data.sessionId) {
+        setActiveView("sessions");
+        openInspector(normalizeSessionId(data.sessionId));
+      }
+    }
+
+    navigator.serviceWorker.addEventListener("message", handleServiceWorkerMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", handleServiceWorkerMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    void refreshPushState();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [voiceApiBase]);
+
+  useEffect(() => {
+    const unreadCount = Object.keys(unreadSessions).length;
+    const badgeNavigator = navigator as Navigator & {
+      setAppBadge?: (count?: number) => Promise<void>;
+      clearAppBadge?: () => Promise<void>;
+    };
+    if (unreadCount > 0) {
+      void badgeNavigator.setAppBadge?.(unreadCount).catch(() => {});
+    } else {
+      void badgeNavigator.clearAppBadge?.().catch(() => {});
+    }
+  }, [unreadSessions]);
 
   useEffect(() => {
     if (!inspectorSessionId || !voiceApiBase) {
@@ -326,43 +647,151 @@ export function RadioShell() {
 
     const sessionId = inspectorSessionId as string;
     let cancelled = false;
+    let timeoutId: number | null = null;
+    let consecutiveFailures = 0;
+    sessionStreamVersionRef.current = null;
 
     async function refreshSessionStream() {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+
       try {
-        const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/output`, {
-          cache: "no-store"
-        });
+        const knownVersion = sessionStreamVersionRef.current;
+        const query = knownVersion === null ? "" : `?v=${knownVersion}`;
+        const response = await fetchWithTimeout(
+          `${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/output${query}`,
+          6000
+        );
         const payload = await parseJsonResponse<SessionStreamResponse>(response);
-        if (cancelled) {
+        if (cancelled || inspectorSessionIdRef.current !== sessionId) {
           return;
         }
 
-        setSessionStream(payload || null);
+        consecutiveFailures = 0;
+        applySessionStreamPayload(payload);
       } catch {
         if (cancelled) {
           return;
         }
 
-        setSessionStream({
-          error: "Unable to load live stdout.",
-          output: "",
-          outputAvailable: false,
-          sessionId,
-          status: "error"
-        });
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 3) {
+          setSessionStream((currentValue) => ({
+            ...(currentValue || {}),
+            error: "Connection lost. Retrying…",
+            sessionId
+          }));
+        }
       }
     }
 
-    void refreshSessionStream();
-    const intervalId = window.setInterval(() => {
-      void refreshSessionStream();
-    }, SESSION_POLL_INTERVAL_MS);
+    async function loop() {
+      await refreshSessionStream();
+      if (cancelled) {
+        return;
+      }
+
+      timeoutId = window.setTimeout(loop, consecutiveFailures > 0 ? 2000 : SESSION_POLL_INTERVAL_MS);
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        if (timeoutId !== null) {
+          window.clearTimeout(timeoutId);
+        }
+        void loop();
+      }
+    }
+
+    void loop();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
 
     return () => {
       cancelled = true;
-      window.clearInterval(intervalId);
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [inspectorSessionId, voiceApiBase]);
+
+  // Follow the bottom of the terminal like a real console, unless the user
+  // scrolled up to read history.
+  useLayoutEffect(() => {
+    const panel = outputPanelRef.current;
+    if (!panel || !pinnedToBottomRef.current) {
+      return;
+    }
+
+    panel.scrollTop = panel.scrollHeight;
+  }, [sessionStream?.output, inspectorSessionId, terminalFontSize]);
+
+  // Fit the PTY width to the phone so output wraps like a native terminal.
+  useEffect(() => {
+    if (!inspectorSessionId || !voiceApiBase || !fitTerminalWidth || sessionStream?.outputAvailable !== true) {
+      return;
+    }
+
+    const sessionId = inspectorSessionId;
+    let timeoutId: number | null = null;
+
+    function requestResize() {
+      const panel = outputPanelRef.current;
+      const measure = charMeasureRef.current;
+      if (!panel || !measure) {
+        return;
+      }
+
+      const charWidth = measure.getBoundingClientRect().width / 20;
+      const lineHeight = measure.getBoundingClientRect().height || terminalFontSize * 1.45;
+      const panelStyle = window.getComputedStyle(panel);
+      const innerWidth = panel.clientWidth - parseFloat(panelStyle.paddingLeft) - parseFloat(panelStyle.paddingRight);
+      if (!(charWidth > 0) || innerWidth <= 0) {
+        return;
+      }
+
+      const cols = Math.max(30, Math.floor(innerWidth / charWidth) - 1);
+      const keyboardOpen = document.documentElement.dataset.radioKeyboard === "open";
+      const previousRows = Number(lastResizeRef.current.split("x")[1]) || 0;
+      // Don't shrink the PTY just because the on-screen keyboard is open.
+      const rows = keyboardOpen && previousRows > 0
+        ? previousRows
+        : Math.max(16, Math.floor(panel.clientHeight / lineHeight));
+      const signature = `${sessionId}:${cols}x${rows}`;
+      if (lastResizeRef.current === signature) {
+        return;
+      }
+
+      lastResizeRef.current = signature;
+      void fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/resize`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cols, rows })
+      }).catch(() => {
+        lastResizeRef.current = "";
+      });
+    }
+
+    function scheduleResize() {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      timeoutId = window.setTimeout(requestResize, 250);
+    }
+
+    scheduleResize();
+    window.addEventListener("orientationchange", scheduleResize);
+    window.addEventListener("resize", scheduleResize);
+    return () => {
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+      window.removeEventListener("orientationchange", scheduleResize);
+      window.removeEventListener("resize", scheduleResize);
+    };
+  }, [inspectorSessionId, voiceApiBase, fitTerminalWidth, terminalFontSize, sessionStream?.outputAvailable]);
 
   useEffect(() => {
     if (!voiceApiBase) {
@@ -490,7 +919,7 @@ export function RadioShell() {
     const isPendingSpeech = pendingInspectorSpeechSessionRef.current === inspectorSessionId;
     wasInspectorBusyRef.current = isNowBusy;
 
-    if (isNowBusy || (!wasBusy && !isPendingSpeech)) {
+    if (isNowBusy || (!wasBusy && !isPendingSpeech) || !speakResultsRef.current) {
       return;
     }
 
@@ -534,11 +963,6 @@ export function RadioShell() {
     };
   }, [inspectorSessionId]);
 
-  useEffect(() => {
-    if (isKeyboardOpen) {
-      terminalInputRef.current?.focus();
-    }
-  }, [isKeyboardOpen]);
 
   useEffect(() => {
     function switchToNextSession() {
@@ -550,7 +974,7 @@ export function RadioShell() {
         return;
       }
 
-      const availableSessionIds = mergeSessionIds([...sessionIdsRef.current, ...DEFAULT_SESSION_IDS]);
+      const availableSessionIds = sortSessionIds(mergeSessionIds(sessionIdsRef.current));
       if (availableSessionIds.length <= 1) {
         return;
       }
@@ -725,6 +1149,8 @@ export function RadioShell() {
         .finally(() => {
           streamRequestRef.current = null;
         });
+      // Permission errors surface through the hold-to-talk path; avoid an unhandled rejection here.
+      streamRequestRef.current.catch(() => undefined);
     }
 
     button.addEventListener("touchstart", onTouchStart, { passive: false });
@@ -747,6 +1173,8 @@ export function RadioShell() {
         .finally(() => {
           streamRequestRef.current = null;
         });
+      // Permission errors surface through the hold-to-talk path; avoid an unhandled rejection here.
+      streamRequestRef.current.catch(() => undefined);
     }
 
     area.addEventListener("touchstart", onTouchStart, { passive: true });
@@ -953,6 +1381,7 @@ export function RadioShell() {
 
       if (pressedTarget === "__launcher__") {
         lastSessionTapRef.current = null;
+        suppressGhostClickUntilRef.current = Date.now() + 450;
         setIsLauncherOpen(true);
         setStatus("idle");
         return;
@@ -962,6 +1391,7 @@ export function RadioShell() {
         setCurrentSessionId(pressedTarget);
         setStatus("idle");
         lastSessionTapRef.current = null;
+        suppressGhostClickUntilRef.current = Date.now() + 450;
         openInspector(pressedTarget, true);
       }
 
@@ -987,23 +1417,46 @@ export function RadioShell() {
   }
 
   function openInspector(sessionId: string, announceLabel = false) {
+    if (!sessionId) {
+      return;
+    }
+
+    const isSameSession = inspectorSessionIdRef.current === sessionId;
     activeSessionIdRef.current = sessionId;
+    inspectorSessionIdRef.current = sessionId;
     setCurrentSessionId(sessionId);
     setInspectorSessionId(sessionId);
-    setSessionStream(null);
-    setIsKeyboardOpen(false);
-    setTerminalInput("");
+    if (!isSameSession) {
+      setSessionStream(null);
+      sessionStreamVersionRef.current = null;
+      setTerminalInput("");
+    }
     setIsLauncherOpen(false);
+    setIsInspectorMenuOpen(false);
+    setIsConfirmingKill(false);
+    pinnedToBottomRef.current = true;
+    setIsOutputPinnedToBottom(true);
     wasInspectorBusyRef.current = false;
     spokenOutputSignatureRef.current = "";
     pendingInspectorSpeechSessionRef.current = null;
+    lastResizeRef.current = "";
+    setUnreadSessions((current) => {
+      if (!current[sessionId]) {
+        return current;
+      }
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setToasts((current) => current.filter((toast) => toast.sessionId !== sessionId));
 
-    if (announceLabel && voiceApiBase) {
+    const apiBase = voiceApiBaseRef.current;
+    if (announceLabel && apiBase && speakResultsRef.current) {
       stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
       const labelText = formatSessionLabelForSpeech(sessionId);
       const speechRequestId = ++speechRequestSeqRef.current;
       void speakTerminalOutput(
-        voiceApiBase,
+        apiBase,
         labelText,
         speechAudioRef,
         speechVolumeRef,
@@ -1012,19 +1465,304 @@ export function RadioShell() {
         setIsSpeakingOutput,
         speechRequestSeqRef,
         speechRequestId
-      );
+      ).catch(() => {});
     }
   }
 
   function closeInspector() {
+    inspectorSessionIdRef.current = null;
     setInspectorSessionId(null);
     setSessionStream(null);
-    setIsKeyboardOpen(false);
+    sessionStreamVersionRef.current = null;
     setTerminalInput("");
     setIsSendingTerminalInput(false);
+    setIsInspectorMenuOpen(false);
+    setIsConfirmingKill(false);
     pendingInspectorSpeechSessionRef.current = null;
     speechRequestSeqRef.current += 1;
     stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
+    terminalInputRef.current?.blur();
+  }
+
+  function applySessionStreamPayload(payload: SessionStreamResponse | null) {
+    if (!payload) {
+      return;
+    }
+
+    if (typeof payload.version === "number") {
+      sessionStreamVersionRef.current = payload.version;
+    }
+
+    if (payload.unchanged) {
+      setSessionStream((currentValue) => ({
+        ...(currentValue || {}),
+        ...payload,
+        error: undefined,
+        output: currentValue?.output ?? ""
+      }));
+      return;
+    }
+
+    setSessionStream(payload);
+  }
+
+  function handleSessionEvent(event: SessionEvent) {
+    const sessionId = normalizeSessionId(event.sessionId);
+    if (!sessionId || event.kind === "stopped") {
+      return;
+    }
+
+    const isViewing =
+      document.visibilityState === "visible" && inspectorSessionIdRef.current === sessionId;
+    if (isViewing) {
+      return;
+    }
+
+    if (event.kind === "finished" && Number(event.durationMs || 0) < 1500) {
+      return;
+    }
+
+    setUnreadSessions((current) => ({ ...current, [sessionId]: event.kind }));
+    const label = formatSessionLabel(sessionId);
+    const duration = formatDuration(event.durationMs || 0);
+    const title =
+      event.kind === "input"
+        ? `${label} needs input`
+        : event.kind === "exited"
+          ? `${label} closed`
+          : `${label} finished${duration ? ` · ${duration}` : ""}`;
+    const body = String(event.summary || event.command || "").trim();
+    pushToast({ sessionId, kind: event.kind, title, body });
+  }
+
+  function pushToast(entry: Omit<ToastEntry, "id">) {
+    const id = ++toastIdRef.current;
+    setToasts((current) =>
+      [...current.filter((toast) => toast.sessionId !== entry.sessionId), { ...entry, id }].slice(-3)
+    );
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((toast) => toast.id !== id));
+    }, TOAST_DURATION_MS);
+
+    try {
+      navigator.vibrate?.(entry.kind === "input" ? [60, 60, 60, 60, 60] : [90, 50, 90]);
+    } catch {
+      // Vibration is optional.
+    }
+    playChime(speechAudioContextRef, entry.kind === "input");
+  }
+
+  function dismissToast(id: number) {
+    setToasts((current) => current.filter((toast) => toast.id !== id));
+  }
+
+  function handleOutputScroll() {
+    const panel = outputPanelRef.current;
+    if (!panel) {
+      return;
+    }
+
+    const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+    const pinned = distanceFromBottom < 48;
+    if (pinned !== pinnedToBottomRef.current) {
+      pinnedToBottomRef.current = pinned;
+      setIsOutputPinnedToBottom(pinned);
+    }
+  }
+
+  function jumpToLatestOutput() {
+    const panel = outputPanelRef.current;
+    pinnedToBottomRef.current = true;
+    setIsOutputPinnedToBottom(true);
+    if (panel) {
+      panel.scrollTo({ top: panel.scrollHeight, behavior: "smooth" });
+    }
+  }
+
+  async function killInspectorSession() {
+    const sessionId = inspectorSessionIdRef.current;
+    const apiBase = voiceApiBaseRef.current;
+    if (!sessionId || !apiBase) {
+      return;
+    }
+
+    if (!isConfirmingKill) {
+      setIsConfirmingKill(true);
+      return;
+    }
+
+    setIsConfirmingKill(false);
+    setIsInspectorMenuOpen(false);
+    try {
+      const response = await fetch(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/kill`, { method: "POST" });
+      const payload = await parseJsonResponse<{ error?: string }>(response);
+      if (!response.ok) {
+        throw new Error(payload?.error || `Close failed with ${response.status}.`);
+      }
+
+      confirmedSessionIdsRef.current = confirmedSessionIdsRef.current.filter((id) => id !== sessionId);
+      setSessionIds((current) => current.filter((id) => id !== sessionId));
+      closeInspector();
+    } catch (error) {
+      setSessionStream((currentValue) => ({
+        ...(currentValue || {}),
+        error: error instanceof Error ? error.message : "Unable to close the session."
+      }));
+    }
+  }
+
+  async function getPushRegistration() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window) || !("Notification" in window)) {
+      return null;
+    }
+
+    try {
+      return await navigator.serviceWorker.ready;
+    } catch {
+      return null;
+    }
+  }
+
+  async function refreshPushState() {
+    if (!("serviceWorker" in navigator) || !window.isSecureContext) {
+      setPushState("unsupported");
+      return;
+    }
+
+    if (!("PushManager" in window) || !("Notification" in window)) {
+      setPushState(isIosDevice() && !isStandaloneDisplay() ? "needs-install" : "unsupported");
+      return;
+    }
+
+    if (Notification.permission === "denied") {
+      setPushState("denied");
+      return;
+    }
+
+    const registration = await getPushRegistration();
+    const subscription = registration ? await registration.pushManager.getSubscription().catch(() => null) : null;
+    if (!subscription) {
+      setPushState("off");
+      return;
+    }
+
+    const apiBase = voiceApiBaseRef.current;
+    if (apiBase) {
+      try {
+        const response = await fetch(`${apiBase}/push/status`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ endpoint: subscription.endpoint })
+        });
+        const payload = await parseJsonResponse<{ subscribed?: boolean }>(response);
+        if (payload && payload.subscribed === false) {
+          // The PC forgot this phone (e.g. reinstall) - re-register quietly.
+          await registerPushSubscription(subscription, apiBase);
+        }
+      } catch {
+        // Keep the local state; the PC may be briefly unreachable.
+      }
+    }
+
+    setPushState("on");
+  }
+
+  async function registerPushSubscription(subscription: PushSubscription, apiBase: string) {
+    const response = await fetch(`${apiBase}/push/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subscription: subscription.toJSON() })
+    });
+    if (!response.ok) {
+      const payload = await parseJsonResponse<{ error?: string }>(response);
+      throw new Error(payload?.error || `Subscribe failed with ${response.status}.`);
+    }
+  }
+
+  async function enablePushNotifications() {
+    const apiBase = voiceApiBaseRef.current;
+    setPushMessage("");
+    if (!apiBase) {
+      setPushMessage("Not connected to your PC yet.");
+      return;
+    }
+
+    setPushState("working");
+    try {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        setPushState(permission === "denied" ? "denied" : "off");
+        return;
+      }
+
+      const registration = await getPushRegistration();
+      if (!registration) {
+        throw new Error("Service worker is not ready. Reload the app and try again.");
+      }
+
+      const keyResponse = await fetch(`${apiBase}/push/key`, { cache: "no-store" });
+      const keyPayload = await parseJsonResponse<{ publicKey?: string }>(keyResponse);
+      if (!keyPayload?.publicKey) {
+        throw new Error("The PC did not return a push key. Update Siylo on the PC.");
+      }
+
+      const existing = await registration.pushManager.getSubscription();
+      if (existing) {
+        await existing.unsubscribe().catch(() => false);
+      }
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(keyPayload.publicKey)
+      });
+      await registerPushSubscription(subscription, apiBase);
+      setPushState("on");
+      setPushMessage("Notifications are on.");
+    } catch (error) {
+      setPushState("off");
+      setPushMessage(error instanceof Error ? error.message : "Could not enable notifications.");
+    }
+  }
+
+  async function disablePushNotifications() {
+    const apiBase = voiceApiBaseRef.current;
+    setPushState("working");
+    try {
+      const registration = await getPushRegistration();
+      const subscription = registration ? await registration.pushManager.getSubscription() : null;
+      if (subscription) {
+        if (apiBase) {
+          await fetch(`${apiBase}/push/unsubscribe`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ endpoint: subscription.endpoint })
+          }).catch(() => {});
+        }
+        await subscription.unsubscribe().catch(() => false);
+      }
+      setPushMessage("Notifications are off.");
+    } finally {
+      setPushState("off");
+    }
+  }
+
+  async function sendTestNotification() {
+    const apiBase = voiceApiBaseRef.current;
+    if (!apiBase) {
+      return;
+    }
+
+    setPushMessage("Sending…");
+    try {
+      const response = await fetch(`${apiBase}/push/test`, { method: "POST" });
+      const payload = await parseJsonResponse<{ sent?: number; failed?: number }>(response);
+      setPushMessage(
+        payload?.sent
+          ? "Test sent. Lock your phone or switch apps to see it."
+          : "No device received it. Try turning notifications off and on."
+      );
+    } catch {
+      setPushMessage("Could not reach the PC.");
+    }
   }
 
   async function uploadRecording(audioBlob: Blob, sessionId: string, transcript?: string) {
@@ -1151,30 +1889,50 @@ export function RadioShell() {
       console.info(`[radio] open ${target} ->`, payload);
       applyVoicePayload(payload);
       setStatus("executed");
+      const openedSessionId = normalizeSessionId(payload?.sessionId);
+      if (openedSessionId && TERMINAL_LAUNCHER_TARGETS.has(target)) {
+        openInspector(openedSessionId);
+      }
     } catch (error) {
       console.error(`[radio] open ${target} failed:`, error);
       setStatus("error");
+      pushToast({
+        sessionId: `launcher-${target}`,
+        kind: "error",
+        title: `Couldn't open ${formatSessionLabel(target)}`,
+        body: error instanceof Error ? error.message : "The PC did not respond."
+      });
     }
   }
 
-  async function handleTerminalSubmit() {
-    if (!inspectorSessionId || !voiceApiBase || !terminalInput.trim()) {
+  // One entry point for everything typed into a terminal:
+  //  - text + Send  -> types the text and presses Enter
+  //  - empty + Send -> presses Enter on its own (confirm prompts, continue TUIs)
+  //  - key strip    -> sends a single special key
+  async function sendTerminalInput(input: { text?: string; key?: string }) {
+    const sessionId = inspectorSessionIdRef.current;
+    const apiBase = voiceApiBaseRef.current;
+    if (!sessionId || !apiBase || isSendingTerminalInput) {
       return;
     }
 
-    const sessionId = inspectorSessionId as string;
+    const typedText = input.text ?? "";
     setIsSendingTerminalInput(true);
     pendingInspectorSpeechSessionRef.current = sessionId;
+    pinnedToBottomRef.current = true;
+    setIsOutputPinnedToBottom(true);
+
+    if (input.text !== undefined) {
+      setTerminalInput("");
+    }
 
     try {
-      const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
+      const response = await fetchWithTimeout(`${apiBase}/sessions/${encodeURIComponent(sessionId)}/input`, 10000, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          text: terminalInput.trim()
-        })
+        body: JSON.stringify(input.key ? { key: input.key } : { text: typedText, enter: true })
       });
       const payload = await parseJsonResponse<SessionStreamResponse>(response);
 
@@ -1182,50 +1940,17 @@ export function RadioShell() {
         throw new Error(payload?.error || `Terminal input failed with ${response.status}.`);
       }
 
-      setSessionStream(payload || null);
-      setTerminalInput("");
-    } catch {
-      setSessionStream((currentValue) => ({
-        ...(currentValue || {}),
-        error: "Unable to send terminal input.",
-        status: "error"
-      }));
-    } finally {
-      setIsSendingTerminalInput(false);
-    }
-  }
-
-  async function handleTerminalKeyInput(keyName: string) {
-    if (!inspectorSessionId || !voiceApiBase) {
-      return;
-    }
-
-    const sessionId = inspectorSessionId as string;
-    setIsSendingTerminalInput(true);
-    pendingInspectorSpeechSessionRef.current = sessionId;
-
-    try {
-      const response = await fetch(`${voiceApiBase}/sessions/${encodeURIComponent(sessionId)}/input`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          key: keyName
-        })
-      });
-      const payload = await parseJsonResponse<SessionStreamResponse>(response);
-
-      if (!response.ok || payload?.status === "error") {
-        throw new Error(payload?.error || `Terminal key send failed with ${response.status}.`);
+      if (inspectorSessionIdRef.current === sessionId) {
+        applySessionStreamPayload(payload);
       }
-
-      setSessionStream(payload || null);
-    } catch {
+    } catch (error) {
+      if (input.text !== undefined && typedText) {
+        // Give the text back so nothing typed on a phone keyboard is lost.
+        setTerminalInput((current) => current || typedText);
+      }
       setSessionStream((currentValue) => ({
         ...(currentValue || {}),
-        error: "Unable to send terminal key input.",
-        status: "error"
+        error: error instanceof Error && error.message ? error.message : "Unable to send to the terminal."
       }));
     } finally {
       setIsSendingTerminalInput(false);
@@ -1491,10 +2216,8 @@ export function RadioShell() {
         }
 
         if (
-          (event.target as HTMLElement).closest(`.${styles.launcherShell}`) ||
-          (event.target as HTMLElement).closest(`.${styles.inspectorShell}`) ||
-          (event.target as HTMLElement).closest(`.${styles.viewerDock}`) ||
-          (event.target as HTMLElement).closest(`.${styles.bottomTabs}`)
+          (event.target as HTMLElement).closest("[data-no-hold='true']") ||
+          (event.target as HTMLElement).closest(`.${styles.viewerDock}`)
         ) {
           return;
         }
@@ -1522,47 +2245,98 @@ export function RadioShell() {
 
         handleHoldEnd(event.pointerId);
       }}
+      onClickCapture={(event) => {
+        // A tap opens overlays on pointerup; the browser's follow-up click
+        // would otherwise land on whatever just appeared under the finger.
+        if (Date.now() < suppressGhostClickUntilRef.current) {
+          event.preventDefault();
+          event.stopPropagation();
+        }
+      }}
       onContextMenu={(event) => event.preventDefault()}
     >
       <button
         type="button"
+        data-no-hold="true"
         className={styles.settingsButton}
-        aria-label="Open radio settings"
+        aria-label="Open settings"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => {
           event.stopPropagation();
           setIsSettingsOpen(true);
+          void refreshPushState();
         }}
       >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" aria-hidden="true">
           <circle cx="12" cy="12" r="3.2" />
           <path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.04.04a2.05 2.05 0 0 1-2.9 2.9l-.04-.04a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.02 1.56V21a2.05 2.05 0 0 1-4.1 0v-.06A1.7 1.7 0 0 0 8.92 19.4a1.7 1.7 0 0 0-1.88.34l-.04.04a2.05 2.05 0 0 1-2.9-2.9l.04-.04A1.7 1.7 0 0 0 4.48 15a1.7 1.7 0 0 0-1.56-1.02H2.86a2.05 2.05 0 0 1 0-4.1h.06a1.7 1.7 0 0 0 1.56-1.02 1.7 1.7 0 0 0-.34-1.88l-.04-.04a2.05 2.05 0 0 1 2.9-2.9l.04.04a1.7 1.7 0 0 0 1.88.34h.01A1.7 1.7 0 0 0 9.94 2.9V2.84a2.05 2.05 0 0 1 4.1 0v.06a1.7 1.7 0 0 0 1.02 1.56 1.7 1.7 0 0 0 1.88-.34l.04-.04a2.05 2.05 0 0 1 2.9 2.9l-.04.04a1.7 1.7 0 0 0-.34 1.88v.01a1.7 1.7 0 0 0 1.56 1.02h.06a2.05 2.05 0 0 1 0 4.1h-.06A1.7 1.7 0 0 0 19.4 15Z" />
         </svg>
+        {pushState === "off" || pushState === "needs-install" ? <span className={styles.settingsDot} aria-hidden="true" /> : null}
       </button>
 
+      {connectionState !== "online" ? (
+        <div
+          data-no-hold="true"
+          className={`${styles.connectionBanner} ${connectionState === "offline" ? styles.connectionBannerOffline : ""}`}
+          role="status"
+        >
+          <span className={styles.connectionSpinner} aria-hidden="true" />
+          {connectionState === "offline" ? "Lost connection to your PC. Reconnecting…" : "Connecting to your PC…"}
+        </div>
+      ) : null}
+
       {activeView === "sessions" ? (
-        <div className={styles.sessionContainer}>
-          {sessionSlots.map((slot) =>
-            slot.kind === "session" ? (
+        <div className={`${styles.sessionContainer} ${sessionSlots.length > 4 ? styles.sessionContainerDense : ""}`}>
+          {sessionSlots.map((slot) => {
+            if (slot.kind !== "session") {
+              return (
+                <div
+                  key={slot.id}
+                  data-launcher-trigger="true"
+                  className={`${styles.sessionButton} ${styles.placeholder}`}
+                  aria-label="Open a new session"
+                >
+                  <span className={styles.plus}>+</span>
+                  <span className={styles.placeholderLabel}>{sessionSlots.length === 1 ? "Open a terminal" : "New"}</span>
+                </div>
+              );
+            }
+
+            const tileStatus = sessionStatuses[slot.id];
+            const tileState = getTileState(tileStatus, unreadSessions[slot.id]);
+            const elapsed =
+              tileStatus?.activity === "running" && tileStatus.runStartedAt
+                ? formatElapsed(clockNow + serverClockOffset - tileStatus.runStartedAt)
+                : "";
+
+            return (
               <div
                 key={slot.id}
                 data-session-id={slot.id}
-                className={`${styles.sessionButton} ${currentSessionId === slot.id ? styles.active : ""}`}
+                className={`${styles.sessionButton} ${currentSessionId === slot.id ? styles.active : ""} ${styles[`tile_${tileState.tone}`] || ""}`}
               >
-                <span className={styles.sessionLabel}>{formatSessionLabel(slot.id)}</span>
+                <div className={styles.tileTop}>
+                  <span className={styles.sessionLabel}>{formatSessionLabel(slot.id)}</span>
+                  {unreadSessions[slot.id] ? <span className={styles.tileBadge} aria-label="New activity" /> : null}
+                </div>
+                <span className={styles.tileStatus}>
+                  <span className={`${styles.statusDot} ${styles[`statusDot_${tileState.tone}`] || ""}`} aria-hidden="true" />
+                  {tileState.label}
+                  {elapsed ? <span className={styles.tileElapsed}>{elapsed}</span> : null}
+                </span>
+                {tileStatus?.lastLine && tileStatus.activity !== "app" ? (
+                  <span className={styles.tilePreview}>{tileStatus.lastLine}</span>
+                ) : null}
               </div>
-            ) : (
-              <div
-                key={slot.id}
-                data-launcher-trigger="true"
-                className={`${styles.sessionButton} ${styles.placeholder}`}
-                aria-label="Open a new session"
-              >
-                <span className={styles.plus}>+</span>
-              </div>
-            )
-          )}
+            );
+          })}
         </div>
+      ) : null}
+
+      {activeView === "sessions" && !inspectorSessionId ? (
+        <p className={styles.homeHint} aria-hidden="true">
+          {isListening ? "Listening… release to send" : "Tap a terminal to open it · hold anywhere to talk"}
+        </p>
       ) : null}
 
       {activeView === "viewer" ? (
@@ -1639,10 +2413,11 @@ export function RadioShell() {
         </section>
       ) : null}
 
+
       {isLauncherOpen ? (
-        <div className={styles.launcherShell}>
+        <div className={styles.launcherShell} data-no-hold="true">
           <div className={styles.launcherBackdrop} onClick={() => setIsLauncherOpen(false)} aria-hidden="true" />
-          <section className={styles.launcherPanel}>
+          <section className={styles.launcherPanel} role="dialog" aria-label="Open a new session">
             <p className={styles.launcherTitle}>Open</p>
             <div className={styles.launcherGrid}>
               {LAUNCHER_TARGETS.map((target) => (
@@ -1650,6 +2425,7 @@ export function RadioShell() {
                   key={target}
                   type="button"
                   className={styles.launcherButton}
+                  disabled={isBusy}
                   onClick={() => void handleLauncherOpen(target)}
                 >
                   {formatSessionLabel(target)}
@@ -1664,206 +2440,410 @@ export function RadioShell() {
       ) : null}
 
       {inspectorSessionId ? (
-        <div className={styles.inspectorShell}>
-          <div className={styles.inspectorBackdrop} onClick={closeInspector} aria-hidden="true" />
-          <section className={styles.inspectorPanel}>
+        <div className={styles.inspectorShell} data-no-hold="true">
+          <section className={styles.inspectorPanel} aria-label={`${formatSessionLabel(inspectorSessionId)} terminal`}>
             <header className={styles.inspectorHeader}>
-              <div>
+              <button type="button" className={styles.backButton} onClick={closeInspector} aria-label="Back to terminals">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M15 5l-7 7 7 7" />
+                </svg>
+              </button>
+              <div className={styles.inspectorTitleGroup}>
                 <h2 className={styles.inspectorTitle}>{formatSessionLabel(inspectorSessionId)}</h2>
+                <span className={`${styles.statusPill} ${styles[`statusPill_${inspectorStatus.tone}`] || ""}`}>
+                  <span className={`${styles.statusDot} ${styles[`statusDot_${inspectorStatus.tone}`] || ""}`} aria-hidden="true" />
+                  {inspectorStatus.label}
+                  {inspectorElapsed ? <span className={styles.tileElapsed}>{inspectorElapsed}</span> : null}
+                </span>
               </div>
-              <div className={styles.inspectorControls}>
-                <button
-                  type="button"
-                  className={styles.iconButton}
-                  onClick={() => setIsKeyboardOpen((currentValue) => !currentValue)}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true">
-                    <rect x="2.75" y="6.25" width="18.5" height="11.5" rx="2.25" />
-                    <path d="M6.5 10.25h.01" />
-                    <path d="M9.5 10.25h.01" />
-                    <path d="M12.5 10.25h.01" />
-                    <path d="M15.5 10.25h.01" />
-                    <path d="M6.5 13.25h.01" />
-                    <path d="M9.5 13.25h.01" />
-                    <path d="M12.5 13.25h.01" />
-                    <path d="M15.5 13.25h.01" />
-                    <path d="M7 16.25h10" />
-                  </svg>
-                </button>
-                <button type="button" className={styles.closeButton} onClick={closeInspector}>
-                  Close
-                </button>
-              </div>
-            </header>
-
-            <pre className={styles.outputPanel}>
-              {sessionStream?.outputAvailable === false
-                ? sessionStream.message || sessionStream.error || "Stdout is not available for this session."
-                : sessionStream?.output || "Waiting for terminal output..."}
-            </pre>
-
-            {sessionStream?.error ? <p className={styles.inspectorMessage}>{sessionStream.error}</p> : null}
-
-            {isKeyboardOpen ? (
-              <form
-                className={styles.keyboardDock}
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  void handleTerminalSubmit();
+              <button
+                type="button"
+                className={`${styles.iconButton} ${isInspectorMenuOpen ? styles.iconButtonActive : ""}`}
+                aria-label="Terminal options"
+                aria-expanded={isInspectorMenuOpen}
+                onClick={() => {
+                  setIsInspectorMenuOpen((currentValue) => !currentValue);
+                  setIsConfirmingKill(false);
                 }}
               >
-                <input
-                  ref={terminalInputRef}
-                  className={styles.keyboardInput}
-                  type="text"
-                  value={terminalInput}
-                  disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
-                  onChange={(event) => setTerminalInput(event.target.value)}
-                  placeholder={
-                    sessionStream?.inputAvailable === false
-                      ? "Keyboard input is not available for this session"
-                      : "Type a command and press Send"
-                  }
-                />
-                <div className={styles.keyboardActions}>
-                  <button
-                    type="button"
-                    className={styles.keyboardButton}
-                    disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
-                    onClick={() => void handleTerminalKeyInput("enter")}
-                  >
-                    Enter
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.keyboardButton} ${styles.keyboardButtonMuted}`}
-                    disabled={isSendingTerminalInput || sessionStream?.inputAvailable === false}
-                    onClick={() => void handleTerminalKeyInput("ctrl+c")}
-                  >
-                    Ctrl+C
-                  </button>
-                  <button
-                    type="submit"
-                    className={styles.keyboardButton}
-                    disabled={
-                      isSendingTerminalInput ||
-                      sessionStream?.inputAvailable === false ||
-                      !terminalInput.trim()
-                    }
-                  >
-                    {isSendingTerminalInput ? "Sending..." : "Send"}
-                  </button>
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <circle cx="5" cy="12" r="1.9" />
+                  <circle cx="12" cy="12" r="1.9" />
+                  <circle cx="19" cy="12" r="1.9" />
+                </svg>
+              </button>
+            </header>
+
+            {isInspectorMenuOpen ? (
+              <div className={styles.inspectorMenu}>
+                <div className={styles.menuRow}>
+                  <span>Text size</span>
+                  <div className={styles.stepper}>
+                    <button
+                      type="button"
+                      aria-label="Smaller text"
+                      disabled={terminalFontSize <= MIN_TERMINAL_FONT}
+                      onClick={() => setTerminalFontSize((size) => Math.max(MIN_TERMINAL_FONT, size - 1))}
+                    >
+                      A−
+                    </button>
+                    <strong>{terminalFontSize}</strong>
+                    <button
+                      type="button"
+                      aria-label="Larger text"
+                      disabled={terminalFontSize >= MAX_TERMINAL_FONT}
+                      onClick={() => setTerminalFontSize((size) => Math.min(MAX_TERMINAL_FONT, size + 1))}
+                    >
+                      A+
+                    </button>
+                  </div>
                 </div>
-              </form>
+                <label className={styles.menuRow}>
+                  <span>Fit terminal to phone width</span>
+                  <input
+                    type="checkbox"
+                    className={styles.switch}
+                    checked={fitTerminalWidth}
+                    onChange={(event) => setFitTerminalWidth(event.currentTarget.checked)}
+                  />
+                </label>
+                <label className={styles.menuRow}>
+                  <span>Read results aloud</span>
+                  <input
+                    type="checkbox"
+                    className={styles.switch}
+                    checked={speakResults}
+                    onChange={(event) => setSpeakResults(event.currentTarget.checked)}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className={`${styles.menuDanger} ${isConfirmingKill ? styles.menuDangerConfirm : ""}`}
+                  onClick={() => void killInspectorSession()}
+                >
+                  {isConfirmingKill ? `Tap again to close ${formatSessionLabel(inspectorSessionId)}` : "Close this session"}
+                </button>
+              </div>
             ) : null}
-            <div className={styles.terminalCursorRow} aria-hidden="true">
-              <span className={styles.terminalCursor}>_</span>
+
+            <div className={styles.outputWrap}>
+              <pre
+                ref={outputPanelRef}
+                className={styles.outputPanel}
+                style={{ fontSize: `${terminalFontSize}px` }}
+                onScroll={handleOutputScroll}
+              >
+                {sessionStream?.missing
+                  ? "This session has ended."
+                  : sessionStream?.outputAvailable === false
+                    ? sessionStream.message || "Live output is not available for this session."
+                    : sessionStream?.output || (sessionStream ? "" : "Connecting to terminal…")}
+              </pre>
+              <span ref={charMeasureRef} className={styles.charMeasure} style={{ fontSize: `${terminalFontSize}px` }} aria-hidden="true">
+                MMMMMMMMMMMMMMMMMMMM
+              </span>
+              {!isOutputPinnedToBottom ? (
+                <button type="button" className={styles.jumpButton} onClick={jumpToLatestOutput}>
+                  ↓ Latest
+                </button>
+              ) : null}
+            </div>
+
+            {sessionStream?.error ? <p className={styles.inspectorMessage} role="alert">{sessionStream.error}</p> : null}
+
+            {isListening || isSpeakingOutput || status === "processing" ? (
+              <div className={styles.voiceBar} aria-live="polite">
+                <span className={`${styles.voiceBarDot} ${isListening ? styles.voiceBarDotLive : ""}`} aria-hidden="true" />
+                <span className={styles.voiceBarText}>
+                  {isListening
+                    ? liveTranscript || "Listening… release to send"
+                    : status === "processing"
+                      ? "Sending voice command…"
+                      : "Reading the result aloud"}
+                </span>
+                {isSpeakingOutput ? (
+                  <button
+                    type="button"
+                    className={styles.voiceBarStop}
+                    onClick={() => {
+                      stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
+                      speechRequestSeqRef.current += 1;
+                      pendingInspectorSpeechSessionRef.current = null;
+                      const currentSpeechText = buildTerminalSpeechText(sessionStream?.output || "");
+                      if (currentSpeechText) {
+                        spokenOutputSignatureRef.current = `${inspectorSessionId}:${currentSpeechText}`;
+                      }
+                    }}
+                  >
+                    Stop
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+
+            <div className={styles.composer}>
+              {terminalInputAvailable ? (
+                <div className={styles.keyStrip} role="toolbar" aria-label="Special keys">
+                  {TERMINAL_KEYS.map((entry) => (
+                    <button
+                      key={entry.key}
+                      type="button"
+                      className={`${styles.keyButton} ${entry.key === "ctrl+c" ? styles.keyButtonDanger : ""}`}
+                      aria-label={entry.aria}
+                      disabled={isSendingTerminalInput}
+                      onPointerDown={(event) => event.preventDefault()}
+                      onClick={() => void sendTerminalInput({ key: entry.key })}
+                    >
+                      {entry.label}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
+              <form
+                className={styles.composerRow}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  if (!terminalInputAvailable) {
+                    return;
+                  }
+                  void sendTerminalInput({ text: terminalInput });
+                }}
+              >
+                <button
+                  ref={inspectorTalkButtonRef}
+                  type="button"
+                  className={`${styles.talkButton} ${isListening || isPressingToRecord ? styles.talkButtonActive : ""} ${terminalInputAvailable ? "" : styles.talkButtonWide}`}
+                  aria-label="Hold to talk to this terminal"
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 && event.pointerType === "mouse") {
+                      return;
+                    }
+
+                    event.preventDefault();
+                    event.stopPropagation();
+                    trySetPointerCapture(event.currentTarget, event.pointerId);
+                    handleInspectorVoiceButtonStart(event.pointerId);
+                  }}
+                  onPointerUp={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
+                  }}
+                  onPointerCancel={(event) => {
+                    event.stopPropagation();
+                    handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
+                  }}
+                  onContextMenu={(event) => event.preventDefault()}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+                    <line x1="12" x2="12" y1="19" y2="22" />
+                  </svg>
+                  {terminalInputAvailable ? null : <span>{isListening ? "Release to send" : "Hold to talk"}</span>}
+                </button>
+                {terminalInputAvailable ? (
+                  <>
+                    <input
+                      ref={terminalInputRef}
+                      className={styles.composerInput}
+                      type="text"
+                      inputMode="text"
+                      enterKeyHint="send"
+                      autoCapitalize="off"
+                      autoCorrect="off"
+                      autoComplete="off"
+                      spellCheck={false}
+                      value={terminalInput}
+                      onChange={(event) => setTerminalInput(event.target.value)}
+                      placeholder={inspectorStatus.tone === "input" ? "Type your answer…" : "Type a command…"}
+                      aria-label="Command"
+                    />
+                    <button
+                      type="submit"
+                      className={styles.sendButton}
+                      disabled={isSendingTerminalInput}
+                      onPointerDown={(event) => event.preventDefault()}
+                      aria-label={terminalInput.trim() ? "Run command" : "Press Enter"}
+                    >
+                      {isSendingTerminalInput ? (
+                        <span className={styles.sendSpinner} aria-hidden="true" />
+                      ) : terminalInput.trim() ? (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M12 19V5" />
+                          <path d="M5 12l7-7 7 7" />
+                        </svg>
+                      ) : (
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M20 5v7a3 3 0 0 1-3 3H5" />
+                          <path d="M9 11l-4 4 4 4" />
+                        </svg>
+                      )}
+                      <span className={styles.sendLabel}>{terminalInput.trim() ? "Run" : "Enter"}</span>
+                    </button>
+                  </>
+                ) : null}
+              </form>
             </div>
           </section>
-          <button
-            ref={inspectorTalkButtonRef}
-            type="button"
-            className={`${styles.inspectorTalkButton} ${isListening || isPressingToRecord ? styles.inspectorTalkButtonActive : ""}`}
-            aria-label="Hold to speak to this terminal"
-            onPointerDown={(event) => {
-              if (event.button !== 0 && event.pointerType === "mouse") {
-                return;
-              }
-
-              event.preventDefault();
-              event.stopPropagation();
-              trySetPointerCapture(event.currentTarget, event.pointerId);
-              handleInspectorVoiceButtonStart(event.pointerId);
-            }}
-            onPointerUp={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
-            }}
-            onPointerCancel={(event) => {
-              event.stopPropagation();
-              handleInspectorVoiceButtonEnd(event.currentTarget, event.pointerId);
-            }}
-          >
-            <span>{isListening ? "Release" : isPressingToRecord ? "Hold..." : "Talk"}</span>
-          </button>
-          <button
-            type="button"
-            className={`${styles.inspectorSpeechButton} ${isSpeakingOutput ? styles.inspectorSpeechButtonActive : ""}`}
-            aria-label="Cancel spoken terminal output"
-            onClick={() => {
-              stopTerminalSpeechPlayback(speechAudioRef, speechGainNodeRef, setIsSpeakingOutput);
-              speechRequestSeqRef.current += 1;
-              pendingInspectorSpeechSessionRef.current = null;
-              if (inspectorSessionId) {
-                const currentSpeechText = buildTerminalSpeechText(sessionStream?.output || "");
-                if (currentSpeechText) {
-                  spokenOutputSignatureRef.current = `${inspectorSessionId}:${currentSpeechText}`;
-                }
-              }
-            }}
-          >
-            <span>Cancel Voice</span>
-          </button>
         </div>
       ) : null}
 
       {isSettingsOpen ? (
-        <div className={styles.settingsShell}>
+        <div className={styles.settingsShell} data-no-hold="true">
           <div className={styles.settingsBackdrop} onClick={() => setIsSettingsOpen(false)} aria-hidden="true" />
-          <section className={styles.settingsPanel}>
+          <section className={styles.settingsPanel} role="dialog" aria-label="Settings">
             <header className={styles.settingsHeader}>
               <div>
                 <p className={styles.settingsEyebrow}>Settings</p>
-                <h2 className={styles.settingsTitle}>Radio</h2>
+                <h2 className={styles.settingsTitle}>Sylio Radio</h2>
               </div>
               <button type="button" className={styles.closeButton} onClick={() => setIsSettingsOpen(false)}>
-                Close
+                Done
               </button>
             </header>
-            <label className={styles.settingsRange}>
-              <span>Voice output</span>
-              <strong>{speechVolume.toFixed(1)}x</strong>
-              <input
-                type="range"
-                min="0"
-                max="10"
-                step="0.05"
-                value={speechVolume}
-                onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
-              />
-            </label>
+
+            <div className={styles.settingsSection}>
+              <p className={styles.settingsSectionTitle}>Notifications</p>
+              <p className={styles.settingsHelp}>{describePushState(pushState)}</p>
+              <div className={styles.settingsActions}>
+                {pushState === "on" ? (
+                  <>
+                    <button type="button" className={styles.settingsPrimary} onClick={() => void sendTestNotification()}>
+                      Send test
+                    </button>
+                    <button type="button" className={styles.settingsSecondary} onClick={() => void disablePushNotifications()}>
+                      Turn off
+                    </button>
+                  </>
+                ) : pushState === "off" || pushState === "working" ? (
+                  <button
+                    type="button"
+                    className={styles.settingsPrimary}
+                    disabled={pushState === "working"}
+                    onClick={() => void enablePushNotifications()}
+                  >
+                    {pushState === "working" ? "Working…" : "Turn on notifications"}
+                  </button>
+                ) : null}
+              </div>
+              {pushMessage ? <p className={styles.settingsNote}>{pushMessage}</p> : null}
+            </div>
+
+            <div className={styles.settingsSection}>
+              <label className={styles.menuRow}>
+                <span>Read results aloud</span>
+                <input
+                  type="checkbox"
+                  className={styles.switch}
+                  checked={speakResults}
+                  onChange={(event) => setSpeakResults(event.currentTarget.checked)}
+                />
+              </label>
+              <label className={styles.settingsRange}>
+                <span>Voice volume</span>
+                <strong>{Math.round(speechVolume * 100)}%</strong>
+                <input
+                  type="range"
+                  min="0"
+                  max="10"
+                  step="0.05"
+                  value={speechVolume}
+                  onChange={(event) => setSpeechVolume(Number(event.currentTarget.value))}
+                />
+              </label>
+            </div>
+
+            <div className={styles.settingsSection}>
+              <div className={styles.menuRow}>
+                <span>Terminal text size</span>
+                <div className={styles.stepper}>
+                  <button
+                    type="button"
+                    aria-label="Smaller text"
+                    disabled={terminalFontSize <= MIN_TERMINAL_FONT}
+                    onClick={() => setTerminalFontSize((size) => Math.max(MIN_TERMINAL_FONT, size - 1))}
+                  >
+                    A−
+                  </button>
+                  <strong>{terminalFontSize}</strong>
+                  <button
+                    type="button"
+                    aria-label="Larger text"
+                    disabled={terminalFontSize >= MAX_TERMINAL_FONT}
+                    onClick={() => setTerminalFontSize((size) => Math.min(MAX_TERMINAL_FONT, size + 1))}
+                  >
+                    A+
+                  </button>
+                </div>
+              </div>
+              <label className={styles.menuRow}>
+                <span>Fit terminal to phone width</span>
+                <input
+                  type="checkbox"
+                  className={styles.switch}
+                  checked={fitTerminalWidth}
+                  onChange={(event) => setFitTerminalWidth(event.currentTarget.checked)}
+                />
+              </label>
+            </div>
           </section>
         </div>
       ) : null}
 
-      {isListening && liveTranscript ? (
+      {toasts.length > 0 ? (
+        <div className={styles.toastStack} data-no-hold="true" aria-live="polite">
+          {toasts.map((toast) => (
+            <div key={toast.id} className={`${styles.toast} ${styles[`toast_${toast.kind}`] || ""}`}>
+              <button
+                type="button"
+                className={styles.toastBody}
+                onClick={() => {
+                  dismissToast(toast.id);
+                  if (sessionIds.includes(toast.sessionId)) {
+                    setActiveView("sessions");
+                    openInspector(toast.sessionId);
+                  }
+                }}
+              >
+                <strong>{toast.title}</strong>
+                {toast.body ? <span>{toast.body}</span> : null}
+              </button>
+              <button type="button" className={styles.toastClose} aria-label="Dismiss" onClick={() => dismissToast(toast.id)}>
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {isListening && liveTranscript && !inspectorSessionId ? (
         <div className={styles.liveTranscript} aria-live="polite">
           {liveTranscript}
         </div>
       ) : null}
 
-      {activeView === "sessions" ? (
-      <div
-        className={`${styles.micIconContainer} ${isListening || isPressingToRecord ? styles.micIconContainerActive : ""}`}
-      >
-        <svg
-          className={`${styles.micIcon} ${isListening || isPressingToRecord ? styles.micIconActive : ""}`}
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
+      {activeView === "sessions" && !inspectorSessionId ? (
+        <div
+          className={`${styles.micIconContainer} ${isListening || isPressingToRecord ? styles.micIconContainerActive : ""} ${status === "processing" ? styles.micIconContainerBusy : ""}`}
         >
-          <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
-          <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
-          <line x1="12" x2="12" y1="19" y2="22" />
-        </svg>
-      </div>
+          <svg
+            className={`${styles.micIcon} ${isListening || isPressingToRecord ? styles.micIconActive : ""}`}
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+            <line x1="12" x2="12" y1="19" y2="22" />
+          </svg>
+        </div>
       ) : null}
 
-      <nav className={styles.bottomTabs} aria-label="Radio navigation">
+      <nav className={styles.bottomTabs} data-no-hold="true" aria-label="Radio navigation">
         <button
           type="button"
           className={`${styles.bottomTab} ${activeView === "sessions" ? styles.bottomTabActive : ""}`}
@@ -1874,6 +2854,9 @@ export function RadioShell() {
           }}
         >
           Terminals
+          {Object.keys(unreadSessions).length > 0 ? (
+            <span className={styles.tabBadge}>{Object.keys(unreadSessions).length}</span>
+          ) : null}
         </button>
         <button
           type="button"
@@ -1884,7 +2867,7 @@ export function RadioShell() {
             setActiveView("viewer");
           }}
         >
-          Viewer
+          Screen
         </button>
       </nav>
     </main>
@@ -2509,7 +3492,7 @@ function normalizeSessionId(sessionId: string | null | undefined) {
 }
 
 function buildSessionSlots(sessionIds: string[]) {
-  const orderedSessions = sortSessionIds(sessionIds).slice(0, 4);
+  const orderedSessions = sortSessionIds(sessionIds).slice(0, 9);
   const slots: Array<
     | {
         kind: "session";
@@ -2521,9 +3504,7 @@ function buildSessionSlots(sessionIds: string[]) {
       }
   > = orderedSessions.map((sessionId) => ({ kind: "session", id: sessionId }));
 
-  if (slots.length < 4) {
-    slots.push({ kind: "placeholder", id: "launcher-placeholder" });
-  }
+  slots.push({ kind: "placeholder", id: "launcher-placeholder" });
 
   return slots;
 }
@@ -2574,25 +3555,197 @@ function formatSessionLabel(sessionId: string) {
     return labelMap[normalized];
   }
 
-  if (/^(cmd|powershell)-\d+$/.test(normalized)) {
-    return normalized.toUpperCase();
+  const numbered = normalized.match(/^(cmd|powershell)-(\d+)$/);
+  if (numbered) {
+    return `${labelMap[numbered[1]]} ${numbered[2]}`;
   }
 
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 
-function getInspectorStatusLabel(stream: SessionStreamResponse | null) {
+function getInspectorStatus(stream: SessionStreamResponse | null, isSending: boolean) {
   if (!stream) {
-    return "Connecting";
+    return { label: "Connecting", tone: "muted" };
+  }
+
+  if (stream.missing) {
+    return { label: "Ended", tone: "muted" };
   }
 
   if (stream.outputAvailable === false) {
-    return "No stream";
+    return { label: "App", tone: "muted" };
+  }
+
+  if (stream.waitingForInput) {
+    return { label: "Needs input", tone: "input" };
   }
 
   if (stream.isBusy) {
-    return "Running";
+    return { label: "Running", tone: "running" };
   }
 
-  return "Ready";
+  if (isSending) {
+    return { label: "Sending", tone: "running" };
+  }
+
+  return { label: "Ready", tone: "ready" };
+}
+
+function getTileState(status: SessionStatus | undefined, unreadKind: string | undefined) {
+  if (!status) {
+    return { label: "Starting…", tone: "muted" };
+  }
+
+  if (status.activity === "app") {
+    return { label: "Desktop app", tone: "muted" };
+  }
+
+  if (status.waitingForInput) {
+    return { label: "Needs input", tone: "input" };
+  }
+
+  if (status.activity === "running") {
+    return { label: "Running", tone: "running" };
+  }
+
+  if (unreadKind === "finished") {
+    return { label: "Finished", tone: "done" };
+  }
+
+  if (unreadKind === "exited") {
+    return { label: "Closed", tone: "muted" };
+  }
+
+  return { label: "Ready", tone: "ready" };
+}
+
+function formatElapsed(durationMs: number) {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatDuration(durationMs: number) {
+  const totalSeconds = Math.round(Math.max(0, durationMs) / 1000);
+  if (totalSeconds <= 0) {
+    return "";
+  }
+
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes < 60) {
+    return seconds ? `${minutes}m ${seconds}s` : `${minutes}m`;
+  }
+
+  return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs: number, init: RequestInit = {}) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(url, {
+      cache: "no-store",
+      ...init,
+      signal: controller.signal
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
+function playChime(audioContextRef: MutableRefObject<AudioContext | null>, urgent: boolean) {
+  try {
+    const audioWindow = window as Window & {
+      AudioContext?: typeof AudioContext;
+      webkitAudioContext?: typeof AudioContext;
+    };
+    const AudioContextCtor = audioWindow.AudioContext || audioWindow.webkitAudioContext;
+    if (!AudioContextCtor) {
+      return;
+    }
+
+    let context = audioContextRef.current;
+    if (!context || context.state === "closed") {
+      context = new AudioContextCtor();
+      audioContextRef.current = context;
+    }
+
+    if (context.state === "suspended") {
+      void context.resume().catch(() => {});
+    }
+
+    const notes = urgent ? [880, 660, 880] : [660, 990];
+    const startAt = context.currentTime + 0.02;
+    notes.forEach((frequency, index) => {
+      const oscillator = context!.createOscillator();
+      const gain = context!.createGain();
+      const noteStart = startAt + index * 0.14;
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.0001, noteStart);
+      gain.gain.exponentialRampToValueAtTime(0.18, noteStart + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, noteStart + 0.13);
+      oscillator.connect(gain);
+      gain.connect(context!.destination);
+      oscillator.start(noteStart);
+      oscillator.stop(noteStart + 0.14);
+    });
+  } catch {
+    // Sound is a nice-to-have.
+  }
+}
+
+function urlBase64ToUint8Array(base64String: string) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = window.atob(base64);
+  const output = new Uint8Array(rawData.length);
+  for (let index = 0; index < rawData.length; index += 1) {
+    output[index] = rawData.charCodeAt(index);
+  }
+
+  return output;
+}
+
+function isIosDevice() {
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) ||
+    (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+}
+
+function isStandaloneDisplay() {
+  return (
+    window.matchMedia("(display-mode: standalone)").matches ||
+    Boolean((navigator as Navigator & { standalone?: boolean }).standalone)
+  );
+}
+
+function describePushState(state: PushState) {
+  switch (state) {
+    case "on":
+      return "On. You'll get a notification when a terminal finishes or needs input, even when the app is closed.";
+    case "off":
+      return "Get a notification on this phone when a terminal finishes or is waiting for input.";
+    case "working":
+      return "Setting up notifications…";
+    case "denied":
+      return "Notifications are blocked for this site. Allow them in your phone's settings for this app, then reopen it.";
+    case "needs-install":
+      return "On iPhone, notifications need the app on your Home Screen: tap Share → Add to Home Screen, then open it from there.";
+    case "unsupported":
+      return "This browser doesn't support push notifications. You'll still see alerts while the app is open.";
+    default:
+      return "Checking notification support…";
+  }
 }

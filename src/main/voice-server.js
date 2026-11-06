@@ -3,10 +3,24 @@ const { appendLog, getSession, getStateSnapshot, setVoiceState } = require("./st
 const { executeVoiceCommand } = require("./execution-engine");
 const {
   getManagedSessionSnapshot,
+  getManagedSessionsStatus,
+  getManagedSessionVersion,
+  getSessionEvents,
   hasManagedSession,
+  onSessionEvent,
+  resizeSession,
   sendKeyToSession,
   sendTextToSession
 } = require("./session-manager");
+const {
+  addSubscription,
+  getVapidPublicKey,
+  handleSessionEventForPush,
+  hasSubscription,
+  noteClientVisibility,
+  removeSubscription,
+  sendPushToAll
+} = require("./push-service");
 const {
   getTranscriptionProviderName,
   transcribeAudio
@@ -19,12 +33,22 @@ const {
 const { synthesizeSpeech } = require("./speech-service");
 
 let voiceServer = null;
+let detachPushListener = null;
+
+function ensurePushListener() {
+  if (detachPushListener) {
+    return;
+  }
+
+  detachPushListener = onSessionEvent((event) => handleSessionEventForPush(event));
+}
 
 async function startVoiceServer() {
   if (voiceServer) {
     return getStateSnapshot().voice;
   }
 
+  ensurePushListener();
   const port = resolveVoicePort();
   const host = resolveVoiceHost();
   const url = `http://${host}:${port}`;
@@ -209,7 +233,26 @@ async function handleRequest(request, response) {
     return;
   }
 
-  const sessionRouteMatch = requestUrl.pathname.match(/^\/sessions\/([^/]+)\/(output|input)$/i);
+  if (requestUrl.pathname.startsWith("/push/")) {
+    await handlePushRequest(request, response, requestUrl);
+    return;
+  }
+
+  if (request.method === "GET" && requestUrl.pathname === "/sessions/status") {
+    const visible = requestUrl.searchParams.get("visible") === "1";
+    noteClientVisibility(visible, requestUrl.searchParams.get("viewing") || "");
+    const events = getSessionEvents(requestUrl.searchParams.get("since") || 0);
+    sendJson(response, 200, {
+      status: "ok",
+      now: Date.now(),
+      sessions: buildSessionStatusList(),
+      events: events.events,
+      seq: events.seq
+    });
+    return;
+  }
+
+  const sessionRouteMatch = requestUrl.pathname.match(/^\/sessions\/([^/]+)\/(output|input|resize|kill)$/i);
   if (sessionRouteMatch) {
     const sessionId = decodeURIComponent(sessionRouteMatch[1] || "").trim().toLowerCase();
     const routeType = (sessionRouteMatch[2] || "").toLowerCase();
@@ -223,7 +266,9 @@ async function handleRequest(request, response) {
     }
 
     if (routeType === "output" && request.method === "GET") {
-      sendJson(response, 200, resolveSessionOutputPayload(sessionId));
+      noteClientVisibility(requestUrl.searchParams.get("visible") !== "0", sessionId);
+      const knownVersion = requestUrl.searchParams.get("v");
+      sendJson(response, 200, resolveSessionOutputPayload(sessionId, knownVersion));
       return;
     }
 
@@ -231,6 +276,27 @@ async function handleRequest(request, response) {
       const payload = await parseJsonRequest(request);
       const result = await handleSessionInputRequest(sessionId, payload);
       sendJson(response, 200, result);
+      return;
+    }
+
+    if (routeType === "resize" && request.method === "POST") {
+      const payload = await parseJsonRequest(request);
+      if (!hasManagedSession(sessionId)) {
+        sendJson(response, 404, { error: `Session not found: ${sessionId}`, status: "error" });
+        return;
+      }
+      const result = resizeSession(sessionId, payload?.cols, payload?.rows);
+      sendJson(response, 200, { status: "ok", sessionId, ...result });
+      return;
+    }
+
+    if (routeType === "kill" && request.method === "POST") {
+      if (!getSession(sessionId)) {
+        sendJson(response, 404, { error: `Session not found: ${sessionId}`, status: "error" });
+        return;
+      }
+      const execution = await executeVoiceCommand({ requestedSessionId: "", transcript: `kill ${sessionId}` });
+      sendJson(response, 200, { status: "ok", sessionId, route: execution.route });
       return;
     }
   }
@@ -354,12 +420,13 @@ async function parseJsonRequest(request) {
   return JSON.parse(bodyText);
 }
 
-function resolveSessionOutputPayload(sessionId) {
+function resolveSessionOutputPayload(sessionId, knownVersion = null) {
   const session = getSession(sessionId);
   if (!session) {
     return {
       error: `Session not found: ${sessionId}`,
       inputAvailable: false,
+      missing: true,
       output: "",
       outputAvailable: false,
       sessionId,
@@ -371,7 +438,7 @@ function resolveSessionOutputPayload(sessionId) {
     return {
       inputAvailable: false,
       isBusy: false,
-      message: "Live stdout is available only for managed terminal sessions.",
+      message: "Live output is only available for terminal sessions. Use Talk to send commands to this app.",
       output: "",
       outputAvailable: false,
       sessionId,
@@ -379,15 +446,59 @@ function resolveSessionOutputPayload(sessionId) {
     };
   }
 
+  const currentVersion = getManagedSessionVersion(sessionId);
+  if (knownVersion !== null && knownVersion !== "" && Number(knownVersion) === currentVersion) {
+    const statusEntry = buildSessionStatusList().find((entry) => entry.id === sessionId);
+    return {
+      activity: statusEntry?.activity || "idle",
+      inputAvailable: true,
+      isBusy: Boolean(statusEntry?.isBusy),
+      outputAvailable: true,
+      runStartedAt: statusEntry?.runStartedAt || 0,
+      sessionId,
+      status: "ok",
+      unchanged: true,
+      version: currentVersion,
+      waitingForInput: Boolean(statusEntry?.waitingForInput)
+    };
+  }
+
   const snapshot = getManagedSessionSnapshot(sessionId);
   return {
+    activity: snapshot?.activity || "idle",
+    cols: snapshot?.cols || 0,
     inputAvailable: true,
     isBusy: snapshot?.isBusy || false,
     output: snapshot?.output || "",
     outputAvailable: true,
+    runStartedAt: snapshot?.runStartedAt || 0,
     sessionId,
-    status: "ok"
+    status: "ok",
+    version: snapshot?.version ?? currentVersion,
+    waitingForInput: Boolean(snapshot?.waitingForInput)
   };
+}
+
+function buildSessionStatusList() {
+  const managedStatuses = getManagedSessionsStatus();
+  const managedIds = new Set(managedStatuses.map((entry) => entry.id));
+  const desktopStatuses = getStateSnapshot().sessions
+    .filter((session) => !managedIds.has(session.id))
+    .map((session) => ({
+      id: session.id,
+      shell: session.shell,
+      activity: "app",
+      isBusy: false,
+      lastCommand: session.lastCommand || "",
+      lastFinishedAt: 0,
+      lastEventKind: "",
+      lastLine: "",
+      runStartedAt: 0,
+      version: 0,
+      waitingForInput: false
+    }));
+
+  return [...managedStatuses, ...desktopStatuses];
 }
 
 async function handleSessionInputRequest(sessionId, payload) {
@@ -400,18 +511,62 @@ async function handleSessionInputRequest(sessionId, payload) {
     throw new Error("Keyboard input is available only for managed terminal sessions.");
   }
 
-  const text = String(payload?.text || "").trim();
+  const rawText = typeof payload?.text === "string" ? payload.text : "";
+  const text = rawText.replace(/[\r\n]+$/g, "");
   const key = String(payload?.key || "").trim();
+  const pressEnter = payload?.enter !== false;
 
-  if (text) {
-    await sendTextToSession(sessionId, text, { allowBusy: true });
-  } else if (key) {
+  if (key) {
     await sendKeyToSession(sessionId, key);
+  } else if (text || pressEnter) {
+    await sendTextToSession(sessionId, text, { allowBusy: true, pressEnter });
   } else {
     throw new Error("Input payload must include `text` or `key`.");
   }
 
+  // Give the shell a moment to echo so the response already shows the result.
+  await delay(140);
   return resolveSessionOutputPayload(sessionId);
+}
+
+async function handlePushRequest(request, response, requestUrl) {
+  if (request.method === "GET" && requestUrl.pathname === "/push/key") {
+    sendJson(response, 200, { status: "ok", publicKey: getVapidPublicKey() });
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/push/subscribe") {
+    const payload = await parseJsonRequest(request);
+    const result = addSubscription(payload?.subscription || payload);
+    sendJson(response, 200, { status: "ok", ...result });
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/push/unsubscribe") {
+    const payload = await parseJsonRequest(request);
+    const result = removeSubscription(String(payload?.endpoint || ""));
+    sendJson(response, 200, { status: "ok", ...result });
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/push/status") {
+    const payload = await parseJsonRequest(request);
+    sendJson(response, 200, { status: "ok", subscribed: hasSubscription(String(payload?.endpoint || "")) });
+    return;
+  }
+
+  if (request.method === "POST" && requestUrl.pathname === "/push/test") {
+    const result = await sendPushToAll({
+      title: "Siylo notifications are on",
+      body: "You'll get a notification when a terminal finishes or needs input.",
+      tag: "siylo-test",
+      url: "/radio"
+    });
+    sendJson(response, 200, { status: "ok", ...result });
+    return;
+  }
+
+  sendJson(response, 404, { error: "Not found.", status: "error" });
 }
 
 function readRequestBody(request, maxBytes = 32 * 1024 * 1024) {
@@ -501,6 +656,7 @@ function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS, POST");
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Content-Type", "application/json; charset=utf-8");
+  response.setHeader("Cache-Control", "no-store");
 }
 
 function sendJson(response, statusCode, payload) {

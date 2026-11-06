@@ -1,4 +1,5 @@
 const pty = require("node-pty");
+const { Terminal } = require("@xterm/headless");
 const {
   addSession,
   appendLog,
@@ -9,7 +10,22 @@ const {
 } = require("./state");
 
 const runtimeSessions = new Map();
+const sessionEventListeners = new Set();
+const sessionEvents = [];
+const MAX_SESSION_EVENTS = 60;
+const SNAPSHOT_MAX_LINES = 600;
+const SCROLLBACK_LINES = 3000;
+const ACTIVITY_TICK_MS = 350;
+const PROMPT_SETTLE_MS = 350;
+const BUSY_INDICATOR_SETTLE_MS = 1500;
+const INPUT_WAIT_SETTLE_MS = 3500;
+const TUI_IDLE_SETTLE_MS = 1200;
+const MIN_COLS = 30;
+const MAX_COLS = 220;
+const MIN_ROWS = 10;
+const MAX_ROWS = 120;
 
+let sessionEventSeq = 0;
 let onSessionExit = null;
 
 function initializeSessionManager(options = {}) {
@@ -43,12 +59,14 @@ async function createManagedSession(shell, options = {}) {
 
   const executable = options.executable || (runtimeShell === "cmd" ? "cmd.exe" : "powershell.exe");
   const args = Array.isArray(options.args) ? options.args : runtimeShell === "cmd" ? [] : ["-NoLogo"];
+  const cols = clampInt(options.cols, MIN_COLS, MAX_COLS, 120);
+  const rows = clampInt(options.rows, MIN_ROWS, MAX_ROWS, 30);
   const ptyProcess = pty.spawn(executable, args, {
-    name: "xterm-color",
+    name: "xterm-256color",
     cwd: options.cwd || process.cwd(),
     env: options.env || process.env,
-    cols: options.cols || 120,
-    rows: options.rows || 30
+    cols,
+    rows
   });
 
   const session = addSession({
@@ -59,44 +77,94 @@ async function createManagedSession(shell, options = {}) {
     pid: ptyProcess.pid
   });
 
-  runtimeSessions.set(sessionId, {
+  // A headless terminal emulator keeps an exact copy of what the real console
+  // shows. ConPTY repaints lines with cursor movement, so simply stripping ANSI
+  // codes produced duplicated / stale lines.
+  const terminal = new Terminal({
+    allowProposedApi: true,
+    cols,
+    rows,
+    scrollback: SCROLLBACK_LINES,
+    // Match ConPTY's own reflow/repaint behaviour so resizes don't leave
+    // stale fragments of the previous width on screen.
+    windowsPty: resolveWindowsPtyOptions()
+  });
+
+  const runtime = {
     process: ptyProcess,
+    terminal,
     pendingOutput: "",
     recentOutput: "",
     isBusy: false,
     lastOutputAt: 0,
-    closed: false
-  });
+    closed: false,
+    version: 0,
+    snapshotCache: null,
+    activity: "idle",
+    runStartedAt: 0,
+    submittedAt: 0,
+    lastSubmittedCommand: "",
+    sawBusyIndicator: false,
+    waitingForInput: false,
+    lastFinishedAt: 0,
+    lastEventKind: "",
+    interrupted: false,
+    activityTimer: null
+  };
+  runtimeSessions.set(sessionId, runtime);
+
+  runtime.activityTimer = setInterval(() => {
+    evaluateSessionActivity(sessionId);
+  }, ACTIVITY_TICK_MS);
+  if (typeof runtime.activityTimer.unref === "function") {
+    runtime.activityTimer.unref();
+  }
 
   ptyProcess.onData((data) => {
-    const runtime = runtimeSessions.get(sessionId);
-    if (!runtime) {
+    const activeRuntime = runtimeSessions.get(sessionId);
+    if (!activeRuntime) {
       return;
     }
 
-    const cleaned = stripAnsi(data);
-    runtime.pendingOutput = `${runtime.pendingOutput}${cleaned}`.slice(-24000);
-    runtime.recentOutput = `${runtime.recentOutput}${cleaned}`.slice(-4000);
-    runtime.lastOutputAt = Date.now();
-    runtime.isBusy = detectBusyState(runtime.recentOutput);
+    activeRuntime.terminal.write(data, () => {
+      activeRuntime.version += 1;
+      activeRuntime.snapshotCache = null;
+    });
 
-    if (!runtime.isBusy && hasInteractivePrompt(runtime.recentOutput)) {
-      runtime.recentOutput = runtime.recentOutput.slice(-800);
+    const cleaned = stripAnsi(data);
+    activeRuntime.pendingOutput = `${activeRuntime.pendingOutput}${cleaned}`.slice(-24000);
+    activeRuntime.recentOutput = `${activeRuntime.recentOutput}${cleaned}`.slice(-4000);
+    activeRuntime.lastOutputAt = Date.now();
+    activeRuntime.isBusy = detectBusyState(activeRuntime.recentOutput);
+
+    if (!activeRuntime.isBusy && hasInteractivePrompt(activeRuntime.recentOutput)) {
+      activeRuntime.recentOutput = activeRuntime.recentOutput.slice(-800);
     }
   });
 
   ptyProcess.onExit(({ exitCode }) => {
-    const runtime = runtimeSessions.get(sessionId);
+    const exitedRuntime = runtimeSessions.get(sessionId);
     runtimeSessions.delete(sessionId);
+    disposeRuntime(exitedRuntime);
     removeSession(sessionId);
     appendLog("info", `Managed session exited: ${sessionId} (code ${exitCode}).`);
+
+    if (exitedRuntime && !exitedRuntime.closed) {
+      emitSessionEvent({
+        sessionId,
+        kind: "exited",
+        durationMs: exitedRuntime.runStartedAt ? Date.now() - exitedRuntime.runStartedAt : 0,
+        command: exitedRuntime.lastSubmittedCommand,
+        summary: `Exited with code ${exitCode}.`
+      });
+    }
 
     if (typeof onSessionExit === "function") {
       Promise.resolve()
         .then(() => onSessionExit({
           sessionId,
           exitCode,
-          pendingOutput: runtime ? runtime.pendingOutput : ""
+          pendingOutput: exitedRuntime ? exitedRuntime.pendingOutput : ""
         }))
         .catch((error) => {
           appendLog("warn", `Session exit handler failed for ${sessionId}: ${formatError(error)}`);
@@ -116,22 +184,7 @@ async function createManagedSession(shell, options = {}) {
 }
 
 async function sendCommandToSession(sessionId, commandText, options = {}) {
-  const session = requireSession(sessionId);
-  const runtime = requireRuntimeSession(sessionId);
-  if (!options.allowBusy) {
-    ensureSessionReadyForInput(sessionId, runtime);
-  }
-
-  runtime.process.write(commandText);
-  await delay(90);
-  runtime.process.write("\r");
-
-  return (
-    updateSession(sessionId, {
-      status: "active",
-      lastCommand: commandText
-    }) || session
-  );
+  return sendTextToSession(sessionId, commandText, options);
 }
 
 async function sendTextToSession(sessionId, commandText, options = {}) {
@@ -141,14 +194,24 @@ async function sendTextToSession(sessionId, commandText, options = {}) {
     ensureSessionReadyForInput(sessionId, runtime);
   }
 
-  runtime.process.write(commandText);
-  await delay(90);
-  runtime.process.write("\r");
+  const text = String(commandText || "");
+  const pressEnter = options.pressEnter !== false;
+  if (text) {
+    runtime.process.write(text);
+  }
+
+  if (pressEnter) {
+    if (text) {
+      await delay(60);
+    }
+    runtime.process.write("\r");
+    markSessionSubmitted(runtime, text);
+  }
 
   return (
     updateSession(sessionId, {
       status: "active",
-      lastCommand: commandText
+      lastCommand: text || "enter"
     }) || session
   );
 }
@@ -157,15 +220,42 @@ async function sendKeyToSession(sessionId, keyName) {
   const session = requireSession(sessionId);
   const runtime = requireRuntimeSession(sessionId);
   const keyValue = normalizeKeyCommand(keyName);
+  const normalizedKeyName = String(keyName || "").trim().toLowerCase();
 
   runtime.process.write(keyValue);
+
+  if (keyValue === "\r") {
+    markSessionSubmitted(runtime, "");
+  } else if (normalizedKeyName === "ctrl+c" || normalizedKeyName === "esc" || normalizedKeyName === "escape") {
+    runtime.interrupted = runtime.activity === "running";
+  }
 
   return (
     updateSession(sessionId, {
       status: "active",
-      lastCommand: keyName.toLowerCase()
+      lastCommand: normalizedKeyName
     }) || session
   );
+}
+
+function resizeSession(sessionId, cols, rows) {
+  const runtime = requireRuntimeSession(sessionId);
+  const nextCols = clampInt(cols, MIN_COLS, MAX_COLS, runtime.terminal.cols);
+  const nextRows = clampInt(rows, MIN_ROWS, MAX_ROWS, runtime.terminal.rows);
+
+  if (nextCols === runtime.terminal.cols && nextRows === runtime.terminal.rows) {
+    return { cols: nextCols, rows: nextRows, changed: false };
+  }
+
+  // ConPTY repaints the whole visible screen after a resize. Clear our copy of
+  // the viewport first (scrollback is kept) so the repaint lands on a clean
+  // screen instead of on top of reflowed fragments from the old width.
+  runtime.terminal.resize(nextCols, nextRows);
+  runtime.terminal.write("\u001b[H\u001b[2J");
+  runtime.process.resize(nextCols, nextRows);
+  runtime.version += 1;
+  runtime.snapshotCache = null;
+  return { cols: nextCols, rows: nextRows, changed: true };
 }
 
 async function bringSessionToFront() {
@@ -178,8 +268,13 @@ async function killSession(sessionId) {
 
   if (runtime) {
     runtime.closed = true;
-    runtime.process.kill();
+    try {
+      runtime.process.kill();
+    } catch (error) {
+      appendLog("warn", `Failed to kill PTY for ${sessionId}: ${formatError(error)}`);
+    }
     runtimeSessions.delete(sessionId);
+    disposeRuntime(runtime);
   }
 
   removeSession(sessionId);
@@ -211,20 +306,385 @@ function hasManagedSession(sessionId) {
   return runtimeSessions.has(sessionId);
 }
 
-function getManagedSessionSnapshot(sessionId, maxLength = 6000) {
+function getManagedSessionSnapshot(sessionId, maxLines = SNAPSHOT_MAX_LINES) {
   const runtime = runtimeSessions.get(sessionId);
   if (!runtime) {
     return null;
   }
 
-  const output = compactTerminalOutput(runtime.recentOutput || runtime.pendingOutput || "").slice(-maxLength).trim();
-  const quietMs = runtime.lastOutputAt > 0 ? Date.now() - runtime.lastOutputAt : Infinity;
+  const screen = readTerminalScreen(runtime);
+  const lines = screen.lines.slice(-maxLines);
 
   return {
     sessionId,
-    isBusy: runtime.isBusy || quietMs < 600,
-    output
+    activity: runtime.activity,
+    cols: runtime.terminal.cols,
+    rows: runtime.terminal.rows,
+    isBusy: runtime.activity === "running",
+    lastFinishedAt: runtime.lastFinishedAt,
+    output: lines.join("\n"),
+    runStartedAt: runtime.activity === "running" ? runtime.runStartedAt : 0,
+    version: runtime.version,
+    waitingForInput: runtime.waitingForInput
   };
+}
+
+function getManagedSessionVersion(sessionId) {
+  const runtime = runtimeSessions.get(sessionId);
+  return runtime ? runtime.version : -1;
+}
+
+function getManagedSessionsStatus() {
+  const statuses = [];
+
+  for (const [sessionId, runtime] of runtimeSessions.entries()) {
+    const screen = readTerminalScreen(runtime);
+    const session = getSession(sessionId);
+    statuses.push({
+      id: sessionId,
+      shell: session?.shell || "",
+      activity: runtime.activity,
+      isBusy: runtime.activity === "running",
+      lastCommand: runtime.lastSubmittedCommand || "",
+      lastFinishedAt: runtime.lastFinishedAt,
+      lastEventKind: runtime.lastEventKind,
+      lastLine: screen.lastLine.slice(0, 160),
+      runStartedAt: runtime.activity === "running" ? runtime.runStartedAt : 0,
+      version: runtime.version,
+      waitingForInput: runtime.waitingForInput
+    });
+  }
+
+  return statuses;
+}
+
+function getSessionEvents(sinceSeq = 0) {
+  const since = Number(sinceSeq) || 0;
+  return {
+    events: sessionEvents.filter((event) => event.seq > since),
+    seq: sessionEventSeq
+  };
+}
+
+function onSessionEvent(listener) {
+  sessionEventListeners.add(listener);
+  return () => {
+    sessionEventListeners.delete(listener);
+  };
+}
+
+function markSessionSubmitted(runtime, commandText) {
+  const now = Date.now();
+  if (runtime.activity !== "running") {
+    runtime.runStartedAt = now;
+    runtime.sawBusyIndicator = false;
+    runtime.interrupted = false;
+  }
+
+  runtime.activity = "running";
+  runtime.submittedAt = now;
+  runtime.waitingForInput = false;
+  if (commandText) {
+    runtime.lastSubmittedCommand = commandText.slice(0, 240);
+  }
+}
+
+function evaluateSessionActivity(sessionId) {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime || runtime.closed) {
+    return;
+  }
+
+  const screen = readTerminalScreen(runtime);
+  const now = Date.now();
+  const quietMs = runtime.lastOutputAt > 0 ? now - runtime.lastOutputAt : Infinity;
+  const busyIndicator = hasBusyIndicator(screen.viewportText);
+
+  if (busyIndicator) {
+    runtime.sawBusyIndicator = true;
+    runtime.waitingForInput = false;
+    if (runtime.activity !== "running") {
+      // TUI tools (Codex, Claude Code...) can start working on their own.
+      runtime.activity = "running";
+      runtime.runStartedAt = now;
+      runtime.submittedAt = now;
+      runtime.interrupted = false;
+    }
+    return;
+  }
+
+  if (runtime.activity !== "running") {
+    return;
+  }
+
+  const outputSinceSubmit = runtime.lastOutputAt > runtime.submittedAt;
+  const sinceSubmitMs = now - runtime.submittedAt;
+  const promptVisible = isShellPromptLine(screen.cursorLine) || isTuiIdlePrompt(screen);
+
+  if (promptVisible && outputSinceSubmit && quietMs >= PROMPT_SETTLE_MS && sinceSubmitMs >= PROMPT_SETTLE_MS) {
+    finishRun(sessionId, runtime, screen, runtime.interrupted ? "stopped" : "finished");
+    return;
+  }
+
+  if (hasTuiInputMarker(screen.cursorLine) && outputSinceSubmit && quietMs >= TUI_IDLE_SETTLE_MS) {
+    finishRun(sessionId, runtime, screen, runtime.interrupted ? "stopped" : "finished");
+    return;
+  }
+
+  if (runtime.sawBusyIndicator && quietMs >= BUSY_INDICATOR_SETTLE_MS) {
+    finishRun(sessionId, runtime, screen, runtime.interrupted ? "stopped" : "finished");
+    return;
+  }
+
+  if (
+    !runtime.waitingForInput &&
+    outputSinceSubmit &&
+    quietMs >= INPUT_WAIT_SETTLE_MS &&
+    isInputRequestLine(screen.cursorLine)
+  ) {
+    runtime.waitingForInput = true;
+    emitSessionEvent({
+      sessionId,
+      kind: "input",
+      durationMs: now - runtime.runStartedAt,
+      command: runtime.lastSubmittedCommand,
+      summary: screen.cursorLine.trim().slice(0, 200)
+    });
+  }
+}
+
+function finishRun(sessionId, runtime, screen, kind) {
+  const now = Date.now();
+  const durationMs = runtime.runStartedAt ? now - runtime.runStartedAt : 0;
+  runtime.activity = "idle";
+  runtime.lastFinishedAt = now;
+  runtime.lastEventKind = kind;
+  runtime.waitingForInput = false;
+  runtime.sawBusyIndicator = false;
+  runtime.interrupted = false;
+  runtime.isBusy = false;
+
+  emitSessionEvent({
+    sessionId,
+    kind,
+    durationMs,
+    command: runtime.lastSubmittedCommand,
+    summary: buildRunSummary(screen.lines)
+  });
+}
+
+function emitSessionEvent(partialEvent) {
+  sessionEventSeq += 1;
+  const event = {
+    ...partialEvent,
+    at: Date.now(),
+    seq: sessionEventSeq
+  };
+  sessionEvents.push(event);
+  if (sessionEvents.length > MAX_SESSION_EVENTS) {
+    sessionEvents.splice(0, sessionEvents.length - MAX_SESSION_EVENTS);
+  }
+
+  for (const listener of sessionEventListeners) {
+    try {
+      const result = listener(event);
+      if (result && typeof result.catch === "function") {
+        result.catch((error) => {
+          appendLog("warn", `Session event listener failed: ${formatError(error)}`);
+        });
+      }
+    } catch (error) {
+      appendLog("warn", `Session event listener failed: ${formatError(error)}`);
+    }
+  }
+}
+
+function buildRunSummary(lines) {
+  let startIndex = 0;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (isShellPromptWithCommand(lines[index]) || isTuiSubmittedPromptLine(lines[index])) {
+      startIndex = index + 1;
+      break;
+    }
+  }
+
+  const meaningful = lines
+    .slice(startIndex)
+    .map((line) => line.trim())
+    .filter((line) => line && !isShellPromptLine(line) && !isTerminalChromeLine(line))
+    .map((line) => line.replace(/^[●•⏺]\s*/, ""));
+  return meaningful.slice(-3).join(" · ").slice(0, 220);
+}
+
+function isTuiSubmittedPromptLine(line) {
+  // "❯ fix the build" / "› explain this" - what the user sent to Codex / Claude Code.
+  return /^\s*[│|]?\s*[›❯]\s+\S/.test(String(line || "")) && !/^\s*[›❯]\s+(Try "|Ask Codex)/.test(String(line || ""));
+}
+
+function isTerminalChromeLine(line) {
+  const value = String(line || "").trim();
+  return (
+    /^[─━═│┃╭╮╰╯\s>›»❯]+$/.test(value) ||
+    /^[⚠⏵✻✶✳✢·*]/.test(value) ||
+    /^[›❯]\s+(Try "|Ask Codex)/.test(value) ||
+    /\b(esc to interrupt|\? for shortcuts|shift\+tab to cycle|for agents)\b/i.test(value) ||
+    /^gpt-[\w.-]+\s/i.test(value)
+  );
+}
+
+function readTerminalScreen(runtime) {
+  if (runtime.snapshotCache && runtime.snapshotCache.version === runtime.version) {
+    return runtime.snapshotCache;
+  }
+
+  const buffer = runtime.terminal.buffer.active;
+  const logicalLines = [];
+  let cursorLogicalIndex = -1;
+  const cursorAbsoluteY = buffer.baseY + buffer.cursorY;
+  const viewportStart = buffer.baseY;
+  const viewportLines = [];
+
+  for (let index = 0; index < buffer.length; index += 1) {
+    const line = buffer.getLine(index);
+    if (!line) {
+      continue;
+    }
+
+    const text = line.translateToString(true);
+    if (line.isWrapped && logicalLines.length > 0) {
+      logicalLines[logicalLines.length - 1] += text;
+    } else {
+      logicalLines.push(text);
+    }
+
+    if (index === cursorAbsoluteY) {
+      cursorLogicalIndex = logicalLines.length - 1;
+    }
+
+    if (index >= viewportStart) {
+      viewportLines.push(text);
+    }
+  }
+
+  let lastContentIndex = logicalLines.length - 1;
+  while (lastContentIndex > cursorLogicalIndex && lastContentIndex >= 0 && !logicalLines[lastContentIndex].trim()) {
+    lastContentIndex -= 1;
+  }
+
+  let firstContentIndex = 0;
+  while (firstContentIndex < lastContentIndex && !logicalLines[firstContentIndex].trim()) {
+    firstContentIndex += 1;
+  }
+
+  const lines = logicalLines
+    .slice(firstContentIndex, lastContentIndex + 1)
+    .map((line) => line.replace(/\s+$/g, ""));
+  const cursorLine = cursorLogicalIndex >= 0 ? logicalLines[cursorLogicalIndex] || "" : "";
+  // Last meaningful output line (skip the bare prompt) for tile previews.
+  let lastLine = "";
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const candidate = lines[index].trim();
+    if (candidate && !isShellPromptLine(candidate) && !isTerminalChromeLine(candidate)) {
+      lastLine = isShellPromptWithCommand(candidate)
+        ? `> ${candidate.replace(/^.*?>\s*/, "")}`
+        : candidate.replace(/^[●•⏺]\s*/, "");
+      break;
+    }
+  }
+
+  runtime.snapshotCache = {
+    version: runtime.version,
+    lines,
+    cursorLine,
+    lastLine,
+    viewportText: viewportLines.join("\n")
+  };
+  return runtime.snapshotCache;
+}
+
+function disposeRuntime(runtime) {
+  if (!runtime) {
+    return;
+  }
+
+  if (runtime.activityTimer) {
+    clearInterval(runtime.activityTimer);
+    runtime.activityTimer = null;
+  }
+
+  try {
+    runtime.terminal.dispose();
+  } catch {
+    // ignore
+  }
+}
+
+function hasBusyIndicator(viewportText) {
+  const text = String(viewportText || "").toLowerCase();
+  return (
+    text.includes("esc to interrupt") ||
+    text.includes("esc to cancel") ||
+    /\bworking\d*\s*\(\d+s/.test(text)
+  );
+}
+
+function isShellPromptLine(line) {
+  const value = String(line || "").replace(/\s+$/g, "");
+  return (
+    /^(?:\([^)]*\)\s*)?ps\s+[^\n>]*>$/i.test(value) ||
+    /^[a-z]:\\[^\n>]*>$/i.test(value) ||
+    /^~\\[^\n>]*>$/i.test(value)
+  );
+}
+
+function isShellPromptWithCommand(line) {
+  const value = String(line || "").trim();
+  return /^(?:\([^)]*\)\s*)?ps\s+[a-z~][^>]*>\s*\S/i.test(value) || /^[a-z]:\\[^>]*>\s*\S/i.test(value);
+}
+
+function hasTuiInputMarker(cursorLine) {
+  // Codex ("› Ask Codex...") and Claude Code ("❯ Try ...") park the cursor on
+  // their input line whenever they are waiting for you.
+  return /^\s*[│|]?\s*[›❯](?:\s|$)/.test(String(cursorLine || ""));
+}
+
+function isTuiIdlePrompt(screen) {
+  // Codex / Claude Code show an empty input marker when idle.
+  const cursorLine = String(screen.cursorLine || "").trim();
+  return /^[│|]?\s*[>›»❯]\s*[│|]?$/.test(cursorLine);
+}
+
+function isInputRequestLine(line) {
+  const value = String(line || "").trim();
+  if (!value || isShellPromptLine(value)) {
+    return false;
+  }
+
+  return (
+    /\?\s*$/.test(value) ||
+    /:\s*$/.test(value) ||
+    /\[(?:y\/n|yes\/no)\]/i.test(value) ||
+    /\((?:y\/n|yes\/no)\)/i.test(value) ||
+    /press (?:enter|any key)/i.test(value)
+  );
+}
+
+function resolveWindowsPtyOptions() {
+  if (process.platform !== "win32") {
+    return undefined;
+  }
+
+  const buildNumber = Number(String(require("node:os").release()).split(".")[2]) || undefined;
+  return { backend: "conpty", buildNumber };
+}
+
+function clampInt(value, min, max, fallback) {
+  const parsed = Math.round(Number(value));
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return Math.max(min, Math.min(parsed, max));
 }
 
 function drainPendingOutput(sessionId, maxLength = 1600) {
@@ -502,6 +962,11 @@ module.exports = {
   listManagedSessions,
   hasManagedSession,
   getManagedSessionSnapshot,
+  getManagedSessionsStatus,
+  getManagedSessionVersion,
+  getSessionEvents,
+  onSessionEvent,
+  resizeSession,
   sendKeyToSession,
   sendCommandToSession,
   sendTextToSession
