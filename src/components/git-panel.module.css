@@ -1,0 +1,838 @@
+/* Mobile source-control / explorer / history panel. Matches radio-shell tokens. */
+
+.shell {
+  --ink: #f4f7fb;
+  --ink-dim: rgba(244, 247, 251, 0.68);
+  --ink-faint: rgba(244, 247, 251, 0.44);
+  --line: rgba(255, 255, 255, 0.1);
+  --raised: rgba(255, 255, 255, 0.06);
+  --accent: #60a5fa;
+  --added: #4ade80;
+  --modified: #fbbf24;
+  --deleted: #f87171;
+  --renamed: #a78bfa;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  position: fixed;
+  top: var(--radio-vtop, 0px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  width: 100vw;
+  height: var(--radio-vh, 100dvh);
+  padding:
+    max(10px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  background: linear-gradient(180deg, #05070d 0%, #0a0f18 100%);
+  color: var(--ink);
+  /* The radio page disables touch scrolling / selection for hold-to-talk. */
+  touch-action: manipulation;
+  user-select: text;
+  -webkit-user-select: text;
+  overflow: hidden;
+}
+
+.shell button {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.shell button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---------- header ---------- */
+
+.header {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 10px;
+}
+
+.iconButton {
+  display: inline-grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.iconButton svg {
+  width: 22px;
+  height: 22px;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.folderButton,
+.viewerTitle {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.folderName {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 1.05rem;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderMeta {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderEditor {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--raised);
+}
+
+.fieldLabel {
+  color: var(--ink-dim);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+
+.textInput,
+.commitInput {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--ink);
+  font: inherit;
+  font-size: 16px; /* stops iOS zooming on focus */
+}
+
+.textInput {
+  font-family: var(--mono);
+  font-size: 14px;
+}
+
+.commitInput {
+  resize: vertical;
+  min-height: 72px;
+}
+
+.textInput:focus,
+.commitInput:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 0;
+}
+
+/* ---------- tabs ---------- */
+
+.tabs {
+  display: grid;
+  flex-shrink: 0;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 4px;
+  padding: 4px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.tab {
+  min-height: 40px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--ink-dim);
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.tabActive {
+  background: var(--ink);
+  color: #08101b !important;
+}
+
+.body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  margin-top: 10px;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 24px;
+}
+
+.emptyState {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 24px;
+  color: var(--ink-dim);
+  text-align: center;
+  word-break: break-word;
+}
+
+.hint {
+  margin: 6px 2px;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+  word-break: break-word;
+}
+
+.hint code {
+  font-family: var(--mono);
+  color: var(--ink-dim);
+}
+
+/* ---------- buttons ---------- */
+
+.buttonRow {
+  display: flex;
+  gap: 8px;
+}
+
+.primaryButton,
+.secondaryButton,
+.syncButton {
+  flex: 1;
+  min-height: 48px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 14px;
+  font-weight: 800;
+}
+
+.primaryButton {
+  background: var(--accent);
+  color: #06101e !important;
+}
+
+.secondaryButton,
+.syncButton {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.linkButton {
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.chipButton {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.chipActive {
+  border-color: transparent;
+  background: rgba(96, 165, 250, 0.25);
+}
+
+/* ---------- changes ---------- */
+
+.branchBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 4px 2px 10px;
+}
+
+.branchName {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.inlineIcon {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  color: var(--accent);
+}
+
+.branchSync {
+  flex-shrink: 0;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.syncRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.commitBox {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.section {
+  margin-top: 14px;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 6px;
+  color: var(--ink-dim);
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.countBadge {
+  display: inline-block;
+  min-width: 20px;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--ink);
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  text-align: center;
+}
+
+.fileList,
+.treeList,
+.historyList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.fileMain {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 52px;
+  justify-content: center;
+  padding: 6px 4px;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.fileName {
+  max-width: 100%;
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileDir {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink-faint);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl; /* keep the end of long paths visible */
+  text-align: left;
+}
+
+.statusLetter {
+  flex-shrink: 0;
+  width: 18px;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.statusAdded {
+  color: var(--added);
+}
+
+.statusModified {
+  color: var(--modified);
+}
+
+.statusDeleted {
+  color: var(--deleted);
+  text-decoration-color: var(--deleted);
+}
+
+.statusRenamed {
+  color: var(--renamed);
+}
+
+.rowAction {
+  flex-shrink: 0;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 1.4rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.numstat {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 6px;
+  font-family: var(--mono);
+  font-size: 0.78rem;
+}
+
+.added {
+  color: var(--added);
+}
+
+.removed {
+  color: var(--deleted);
+}
+
+/* ---------- output console ---------- */
+
+.output {
+  flex-shrink: 0;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.4);
+  overflow: hidden;
+}
+
+.outputToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.okDot,
+.errorDot {
+  flex-shrink: 0;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--added);
+}
+
+.errorDot {
+  background: var(--deleted);
+}
+
+.outputSummary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.outputChevron {
+  color: var(--ink-faint);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.outputLog {
+  max-height: 32vh;
+  margin: 0;
+  padding: 0 12px 12px;
+  overflow: auto;
+  color: var(--ink-dim);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---------- files ---------- */
+
+.treeRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 40px;
+  padding-right: 8px;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+}
+
+.treeRow:active {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.treeIgnored {
+  opacity: 0.45;
+}
+
+.treeChevron {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--ink-faint);
+  font-size: 0.8rem;
+}
+
+.treeFolderIcon,
+.treeFileIcon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 12px;
+  border-radius: 2px;
+  background: #e2b04a;
+}
+
+.treeFileIcon {
+  width: 11px;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.35);
+}
+
+.treeName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.95rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.treeHint {
+  padding: 8px 0;
+  color: var(--ink-faint);
+  font-size: 0.82rem;
+}
+
+.dirtyDot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--modified);
+}
+
+/* ---------- history ---------- */
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 40px;
+  padding: 0 4px 6px;
+  color: var(--ink-dim);
+  font-size: 0.85rem;
+}
+
+.historyRow,
+.historyConnector {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  text-align: left;
+}
+
+.historyRow {
+  min-height: 54px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.historyConnector {
+  min-height: 14px;
+}
+
+.graph {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: pre;
+}
+
+.graphNode {
+  font-size: 13px;
+}
+
+.historyBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 6px 0;
+}
+
+.historySubject {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 0.92rem;
+  font-weight: 600;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.historyMeta {
+  margin-top: 2px;
+  color: var(--ink-faint);
+  font-size: 0.76rem;
+}
+
+.refBadge {
+  display: inline-block;
+  margin-right: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  vertical-align: 1px;
+}
+
+.refHead {
+  background: rgba(96, 165, 250, 0.28);
+  color: #bfdbfe;
+}
+
+.refLocal {
+  background: rgba(74, 222, 128, 0.2);
+  color: #bbf7d0;
+}
+
+.refRemote {
+  background: rgba(167, 139, 250, 0.22);
+  color: #ddd6fe;
+}
+
+.refTag {
+  background: rgba(251, 191, 36, 0.2);
+  color: #fde68a;
+}
+
+/* ---------- viewer ---------- */
+
+.viewer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  padding:
+    max(10px, env(safe-area-inset-top))
+    max(12px, env(safe-area-inset-right))
+    max(8px, env(safe-area-inset-bottom))
+    max(12px, env(safe-area-inset-left));
+  background: #05070d;
+}
+
+.viewerBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.code {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #070b13;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.codeLine {
+  display: flex;
+  min-width: max-content;
+}
+
+.codeWrap .codeLine {
+  min-width: 0;
+}
+
+.lineNo {
+  position: sticky;
+  left: 0;
+  flex-shrink: 0;
+  width: 3.4em;
+  padding-right: 6px;
+  background: #070b13;
+  color: rgba(244, 247, 251, 0.28);
+  text-align: right;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.lineNo + .lineNo {
+  left: 3.4em;
+}
+
+.lineText {
+  flex: 1;
+  padding: 0 10px 0 4px;
+  white-space: pre;
+}
+
+.codeWrap .lineText {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.diff_add {
+  background: rgba(74, 222, 128, 0.13);
+}
+
+.diff_add .lineText::before,
+.diff_del .lineText::before {
+  display: inline-block;
+  width: 1ch;
+  margin-left: -1ch;
+}
+
+.diff_add .lineText {
+  color: #c9f7d8;
+}
+
+.diff_del {
+  background: rgba(248, 113, 113, 0.14);
+}
+
+.diff_del .lineText {
+  color: #fecaca;
+}
+
+.diff_add .lineNo,
+.diff_del .lineNo {
+  background: inherit;
+}
+
+.diff_hunk {
+  background: rgba(96, 165, 250, 0.1);
+  color: #93c5fd;
+}
+
+.diff_meta {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+.commitHeader {
+  padding: 4px 2px 6px;
+}
+
+.commitSubject {
+  margin: 0 0 8px;
+  font-size: 1.1rem;
+  line-height: 1.35;
+}
+
+.commitBody {
+  margin: 0 0 10px;
+  color: var(--ink-dim);
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+}
+
+.commitHash {
+  margin: 6px 0;
+  color: var(--ink-faint);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  word-break: break-all;
+}

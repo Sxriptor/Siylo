@@ -3,6 +3,7 @@
 import type { Dispatch, MutableRefObject, PointerEvent, RefObject, SetStateAction, WheelEvent } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import styles from "./radio-shell.module.css";
+import { GitPanel } from "./git-panel";
 
 const DEFAULT_SESSION_IDS = ["cmd-1", "cmd-2", "cursor", "codex"];
 const LAUNCHER_TARGETS = ["cmd", "powershell", "cursor", "codex"] as const;
@@ -12,6 +13,7 @@ const SPEECH_VOLUME_STORAGE_KEY = "siylo-radio-speech-volume";
 const SPEAK_RESULTS_STORAGE_KEY = "siylo-radio-speak-results";
 const FONT_SIZE_STORAGE_KEY = "siylo-radio-terminal-font";
 const FIT_WIDTH_STORAGE_KEY = "siylo-radio-fit-width";
+const MIC_ENABLED_STORAGE_KEY = "siylo-radio-mic-enabled";
 const RADIO_API_BASE = process.env.NEXT_PUBLIC_RADIO_API_BASE?.replace(/\/$/, "") ?? "";
 const HOLD_TO_RECORD_DELAY_MS = 1000;
 const SESSION_POLL_INTERVAL_MS = 650;
@@ -147,7 +149,13 @@ export function RadioShell() {
   const [speakResults, setSpeakResults] = useState(true);
   const [terminalFontSize, setTerminalFontSize] = useState(DEFAULT_TERMINAL_FONT);
   const [fitTerminalWidth, setFitTerminalWidth] = useState(true);
+  // Mic is opt-in: on iOS an open capture stream switches the whole audio
+  // session to record mode and pauses other apps (Spotify, etc.).
+  const [micEnabled, setMicEnabled] = useState(false);
+  const [micMessage, setMicMessage] = useState("");
+  const micEnabledRef = useRef(false);
   const [isInspectorMenuOpen, setIsInspectorMenuOpen] = useState(false);
+  const [isGitPanelOpen, setIsGitPanelOpen] = useState(false);
   const [isConfirmingKill, setIsConfirmingKill] = useState(false);
   const [isOutputPinnedToBottom, setIsOutputPinnedToBottom] = useState(true);
   const [pushState, setPushState] = useState<PushState>("unknown");
@@ -550,7 +558,20 @@ export function RadioShell() {
     if (storedFit !== null) {
       setFitTerminalWidth(storedFit === "1");
     }
+
+    if (window.localStorage.getItem(MIC_ENABLED_STORAGE_KEY) === "1") {
+      micEnabledRef.current = true;
+      setMicEnabled(true);
+    }
   }, []);
+
+  useEffect(() => {
+    micEnabledRef.current = micEnabled;
+    window.localStorage.setItem(MIC_ENABLED_STORAGE_KEY, micEnabled ? "1" : "0");
+    if (!micEnabled) {
+      releaseMicStream(streamRef, streamRequestRef);
+    }
+  }, [micEnabled]);
 
   useEffect(() => {
     window.localStorage.setItem(SPEAK_RESULTS_STORAGE_KEY, speakResults ? "1" : "0");
@@ -1138,6 +1159,7 @@ export function RadioShell() {
 
     function onTouchStart(event: TouchEvent) {
       event.preventDefault();
+      if (!micEnabledRef.current) return;
       if (streamRef.current?.active || streamRequestRef.current) return;
       if (!navigator.mediaDevices?.getUserMedia) return;
       streamRequestRef.current = navigator.mediaDevices
@@ -1157,29 +1179,35 @@ export function RadioShell() {
     return () => button.removeEventListener("touchstart", onTouchStart);
   }, [inspectorSessionId]);
 
-  useEffect(() => {
-    const area = mainHoldAreaRef.current;
-    if (!area) return;
+  // The main area no longer pre-opens the mic on every touch: doing so grabbed
+  // the iOS audio session (pausing Spotify etc.) even for plain taps. The mic is
+  // opened only once a hold actually turns into a recording, and released after.
 
-    function onTouchStart() {
-      if (streamRef.current?.active || streamRequestRef.current) return;
-      if (!navigator.mediaDevices?.getUserMedia) return;
-      streamRequestRef.current = navigator.mediaDevices
-        .getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } })
-        .then((stream) => {
-          streamRef.current = stream;
-          return stream;
-        })
-        .finally(() => {
-          streamRequestRef.current = null;
-        });
-      // Permission errors surface through the hold-to-talk path; avoid an unhandled rejection here.
-      streamRequestRef.current.catch(() => undefined);
+  async function enableMic() {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMicMessage("This browser doesn't support microphone input.");
+      return false;
     }
-
-    area.addEventListener("touchstart", onTouchStart, { passive: true });
-    return () => area.removeEventListener("touchstart", onTouchStart);
-  }, []);
+    setMicMessage("");
+    try {
+      // Called straight from a tap so iOS shows the permission prompt; the
+      // stream is released right away so other audio can keep playing.
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const track of stream.getTracks()) {
+        track.stop();
+      }
+      micEnabledRef.current = true;
+      setMicEnabled(true);
+      return true;
+    } catch {
+      setMicMessage(
+        "Microphone access was blocked. On iPhone/iPad: Settings → Safari → Microphone → Allow, then try again."
+      );
+      micEnabledRef.current = false;
+      setMicEnabled(false);
+      return false;
+    }
+  }
 
   function startLiveTranscription() {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -1236,6 +1264,19 @@ export function RadioShell() {
       return;
     }
 
+    if (!micEnabledRef.current) {
+      if (pointerId === NATIVE_VOLUME_POINTER_ID) {
+        nativeHoldRequestedRef.current = false;
+      }
+      holdStartedRef.current = false;
+      activePointerIdRef.current = null;
+      setIsPressingToRecord(false);
+      setStatus("idle");
+      setMicMessage("Voice input is off. Turn on the microphone here to hold-to-talk.");
+      setIsSettingsOpen(true);
+      return;
+    }
+
     if (!("MediaRecorder" in window) || !navigator.mediaDevices?.getUserMedia) {
       setStatus("error");
       return;
@@ -1249,12 +1290,14 @@ export function RadioShell() {
       const stream = await getOrCreateStream(streamRef, streamRequestRef);
 
       if (activePointerIdRef.current !== pointerId) {
+        releaseMicStream(streamRef, streamRequestRef);
         return;
       }
 
       if (pointerId === NATIVE_VOLUME_POINTER_ID && !nativeHoldRequestedRef.current) {
         activePointerIdRef.current = null;
         setIsPressingToRecord(false);
+        releaseMicStream(streamRef, streamRequestRef);
         return;
       }
 
@@ -1272,11 +1315,14 @@ export function RadioShell() {
         if (pointerId === NATIVE_VOLUME_POINTER_ID) {
           nativeHoldRequestedRef.current = false;
         }
+        releaseMicStream(streamRef, streamRequestRef);
         setStatus("error");
       };
       recorder.onstop = async () => {
         recorderRef.current = null;
         holdStartedRef.current = false;
+        // Hand the iOS audio session back so other apps' audio can resume.
+        releaseMicStream(streamRef, streamRequestRef);
         if (pointerId === NATIVE_VOLUME_POINTER_ID) {
           nativeHoldRequestedRef.current = false;
         }
@@ -1310,6 +1356,7 @@ export function RadioShell() {
       startLiveTranscription();
     } catch {
       holdStartedRef.current = false;
+      releaseMicStream(streamRef, streamRequestRef);
       if (pointerId === NATIVE_VOLUME_POINTER_ID) {
         nativeHoldRequestedRef.current = false;
       }
@@ -1348,9 +1395,6 @@ export function RadioShell() {
       (target.closest<HTMLElement>("[data-launcher-trigger='true']") ? "__launcher__" : null);
     holdStartedRef.current = false;
     clearHoldTimer(holdTimerRef);
-    void getOrCreateStream(streamRef, streamRequestRef).catch(() => {
-      // Surface the real failure when the long-press recording path runs.
-    });
     holdTimerRef.current = window.setTimeout(() => {
       if (activePointerIdRef.current !== pointerId) {
         return;
@@ -1477,6 +1521,7 @@ export function RadioShell() {
     setTerminalInput("");
     setIsSendingTerminalInput(false);
     setIsInspectorMenuOpen(false);
+    setIsGitPanelOpen(false);
     setIsConfirmingKill(false);
     pendingInspectorSpeechSessionRef.current = null;
     speechRequestSeqRef.current += 1;
@@ -1959,6 +2004,12 @@ export function RadioShell() {
 
   function handleInspectorVoiceButtonStart(pointerId: number) {
     if (!inspectorSessionId || isBusy || isListening) {
+      return;
+    }
+
+    if (!micEnabledRef.current) {
+      // The mic button doubles as the permission request; recording starts on the next press.
+      void enableMic();
       return;
     }
 
@@ -2458,6 +2509,24 @@ export function RadioShell() {
               </div>
               <button
                 type="button"
+                className={styles.iconButton}
+                aria-label="Source control and files"
+                disabled={!voiceApiBase}
+                onClick={() => {
+                  setIsInspectorMenuOpen(false);
+                  setIsGitPanelOpen(true);
+                }}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <circle cx="6" cy="5" r="2.2" />
+                  <circle cx="6" cy="19" r="2.2" />
+                  <circle cx="18" cy="7" r="2.2" />
+                  <path d="M6 7.2v9.6" />
+                  <path d="M18 9.2c0 5-6 3.5-11.2 8" />
+                </svg>
+              </button>
+              <button
+                type="button"
                 className={`${styles.iconButton} ${isInspectorMenuOpen ? styles.iconButtonActive : ""}`}
                 aria-label="Terminal options"
                 aria-expanded={isInspectorMenuOpen}
@@ -2613,7 +2682,8 @@ export function RadioShell() {
                   ref={inspectorTalkButtonRef}
                   type="button"
                   className={`${styles.talkButton} ${isListening || isPressingToRecord ? styles.talkButtonActive : ""} ${terminalInputAvailable ? "" : styles.talkButtonWide}`}
-                  aria-label="Hold to talk to this terminal"
+                  aria-label={micEnabled ? "Hold to talk to this terminal" : "Tap to allow the microphone"}
+                  title={micEnabled ? undefined : "Tap to allow the microphone"}
                   onPointerDown={(event) => {
                     if (event.button !== 0 && event.pointerType === "mouse") {
                       return;
@@ -2689,6 +2759,15 @@ export function RadioShell() {
         </div>
       ) : null}
 
+      {inspectorSessionId && isGitPanelOpen && voiceApiBase ? (
+        <GitPanel
+          apiBase={voiceApiBase}
+          sessionId={inspectorSessionId}
+          sessionLabel={formatSessionLabel(inspectorSessionId)}
+          onClose={() => setIsGitPanelOpen(false)}
+        />
+      ) : null}
+
       {isSettingsOpen ? (
         <div className={styles.settingsShell} data-no-hold="true">
           <div className={styles.settingsBackdrop} onClick={() => setIsSettingsOpen(false)} aria-hidden="true" />
@@ -2728,6 +2807,31 @@ export function RadioShell() {
                 ) : null}
               </div>
               {pushMessage ? <p className={styles.settingsNote}>{pushMessage}</p> : null}
+            </div>
+
+            <div className={styles.settingsSection}>
+              <p className={styles.settingsSectionTitle}>Microphone</p>
+              <label className={styles.menuRow}>
+                <span>Voice input (hold to talk)</span>
+                <input
+                  type="checkbox"
+                  className={styles.switch}
+                  checked={micEnabled}
+                  onChange={(event) => {
+                    if (event.currentTarget.checked) {
+                      void enableMic();
+                    } else {
+                      setMicMessage("");
+                      setMicEnabled(false);
+                    }
+                  }}
+                />
+              </label>
+              <p className={styles.settingsHelp}>
+                Optional. The mic only opens while you&apos;re holding to talk, so music from other apps keeps
+                playing the rest of the time.
+              </p>
+              {micMessage ? <p className={styles.settingsNote}>{micMessage}</p> : null}
             </div>
 
             <div className={styles.settingsSection}>
@@ -2941,6 +3045,32 @@ function ensureSessionGraceTimeout(
   }, PENDING_SESSION_GRACE_MS);
 }
 
+function releaseMicStream(
+  streamRef: MutableRefObject<MediaStream | null>,
+  streamRequestRef: MutableRefObject<Promise<MediaStream> | null>
+) {
+  const stream = streamRef.current;
+  streamRef.current = null;
+  for (const track of stream?.getTracks() ?? []) {
+    track.stop();
+  }
+
+  // A request still in flight would otherwise leave the mic open once it resolves.
+  const pending = streamRequestRef.current;
+  if (pending) {
+    pending
+      .then((pendingStream) => {
+        if (streamRef.current === pendingStream) {
+          streamRef.current = null;
+        }
+        for (const track of pendingStream.getTracks()) {
+          track.stop();
+        }
+      })
+      .catch(() => undefined);
+  }
+}
+
 async function getOrCreateStream(
   streamRef: RefObject<MediaStream | null>,
   streamRequestRef: MutableRefObject<Promise<MediaStream> | null>
@@ -3113,7 +3243,128 @@ async function hasAudibleSignal(audioBlob: Blob) {
   }
 }
 
+const CLAUDE_SPEECH_MAX_CHARS = 2000;
+
+// Claude Code renders each message as a "● " bullet at column 0 with its
+// continuation lines indented. Tool calls are bullets too ("● Update(file)")
+// followed by "⎿" result lines and diffs. Speak only the prose bullets from the
+// latest turn, so edits, diffs, and tool output are never read aloud.
+function buildClaudeSpeechText(output: string): string | null {
+  const lines = output.split(/\r?\n/).map((line) => line.replace(/\s+$/, ""));
+  const isBulletLine = (line: string) => /^[●⏺]\s/.test(line);
+
+  let lastBulletIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (isBulletLine(lines[index] || "")) {
+      lastBulletIndex = index;
+      break;
+    }
+  }
+
+  if (lastBulletIndex < 0) {
+    return null;
+  }
+
+  // The turn starts after the most recent user prompt above the last bullet.
+  let turnStart = 0;
+  for (let index = lastBulletIndex; index >= 0; index -= 1) {
+    if (/^[>❯›]\s/.test(lines[index] || "")) {
+      turnStart = index + 1;
+      break;
+    }
+  }
+
+  const blocks: string[][] = [];
+  let current: string[] | null = null;
+  for (let index = turnStart; index < lines.length; index += 1) {
+    const line = lines[index] || "";
+    if (isBulletLine(line)) {
+      current = [line];
+      blocks.push(current);
+      continue;
+    }
+    if (!current) {
+      continue;
+    }
+    // Anything else at column 0 (status lines, input box rules, user prompts) ends the block.
+    if (line && !/^\s/.test(line)) {
+      current = null;
+      continue;
+    }
+    current.push(line);
+  }
+
+  const proseBlocks: string[] = [];
+  for (const block of blocks) {
+    const head = (block[0] || "").replace(/^[●⏺]\s+/, "");
+    const isToolCall =
+      block.some((line) => line.includes("⎿")) ||
+      /^[\w.:-]+(\s+-\s+[\w.:-]+)*\s*(\(MCP\))?\(/.test(head) ||
+      /^(Read|Searched|Listed|Update(d)? Todos|Wrote|Ran)\b.*\b(files?|patterns?|lines?|todos?|commands?|directories?)\b/i.test(head);
+    if (isToolCall) {
+      continue;
+    }
+
+    const paragraphs: string[] = [];
+    let paragraph: string[] = [];
+    const flush = () => {
+      if (paragraph.length) {
+        paragraphs.push(paragraph.join(" "));
+        paragraph = [];
+      }
+    };
+
+    for (const [lineIndex, rawLine] of block.entries()) {
+      const text = (lineIndex === 0 ? head : rawLine).trim();
+      if (!text) {
+        flush();
+        continue;
+      }
+      if (isLikelyCodeOrTableLine(text)) {
+        flush();
+        continue;
+      }
+      paragraph.push(text.replace(/\*\*|__|`/g, ""));
+    }
+    flush();
+
+    if (paragraphs.length) {
+      proseBlocks.push(paragraphs.join("\n"));
+    }
+  }
+
+  // Keep the end of the turn (the summary) when the whole turn is too long to read.
+  const kept: string[] = [];
+  let total = 0;
+  for (let index = proseBlocks.length - 1; index >= 0; index -= 1) {
+    const block = proseBlocks[index] || "";
+    if (kept.length && total + block.length > CLAUDE_SPEECH_MAX_CHARS) {
+      break;
+    }
+    kept.unshift(block);
+    total += block.length;
+  }
+
+  return kept.join("\n\n").slice(0, CLAUDE_SPEECH_MAX_CHARS).trim();
+}
+
+function isLikelyCodeOrTableLine(text: string) {
+  if (/[│┃┌┐└┘├┤┬┴┼─━]/.test(text)) {
+    return true;
+  }
+  if (/^\d+\s*[+-]?\s/.test(text) && /[;{}()=]/.test(text)) {
+    return true; // numbered diff / code listing line
+  }
+  const symbols = (text.match(/[{}()[\];=<>$|\\]/g) || []).length;
+  return text.length > 0 && symbols / text.length > 0.12;
+}
+
 function buildTerminalSpeechText(output: string) {
+  const claudeSpeech = buildClaudeSpeechText(output);
+  if (claudeSpeech !== null) {
+    return claudeSpeech;
+  }
+
   const cleanedLines = output
     .split(/\r?\n/)
     .map((line) => line.trim())

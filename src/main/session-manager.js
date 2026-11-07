@@ -8,6 +8,7 @@ const {
   removeSession,
   updateSession
 } = require("./state");
+const { detectCwdFromScreen } = require("./git-service");
 
 const runtimeSessions = new Map();
 const sessionEventListeners = new Set();
@@ -61,9 +62,10 @@ async function createManagedSession(shell, options = {}) {
   const args = Array.isArray(options.args) ? options.args : runtimeShell === "cmd" ? [] : ["-NoLogo"];
   const cols = clampInt(options.cols, MIN_COLS, MAX_COLS, 120);
   const rows = clampInt(options.rows, MIN_ROWS, MAX_ROWS, 30);
+  const initialCwd = options.cwd || process.cwd();
   const ptyProcess = pty.spawn(executable, args, {
     name: "xterm-256color",
-    cwd: options.cwd || process.cwd(),
+    cwd: initialCwd,
     env: options.env || process.env,
     cols,
     rows
@@ -109,7 +111,9 @@ async function createManagedSession(shell, options = {}) {
     lastFinishedAt: 0,
     lastEventKind: "",
     interrupted: false,
-    activityTimer: null
+    activityTimer: null,
+    initialCwd,
+    lastKnownCwd: ""
   };
   runtimeSessions.set(sessionId, runtime);
 
@@ -331,6 +335,24 @@ function getManagedSessionSnapshot(sessionId, maxLines = SNAPSHOT_MAX_LINES) {
     version: runtime.version,
     waitingForInput: runtime.waitingForInput
   };
+}
+
+/**
+ * The folder a terminal is currently in, read from its last shell prompt (or
+ * the cwd header Claude Code / Codex print). Falls back to the last folder we
+ * saw, then the folder the session was started in.
+ */
+function getManagedSessionCwd(sessionId) {
+  const runtime = runtimeSessions.get(sessionId);
+  if (!runtime) {
+    return "";
+  }
+
+  const detected = detectCwdFromScreen(readTerminalScreen(runtime).lines);
+  if (detected) {
+    runtime.lastKnownCwd = detected;
+  }
+  return runtime.lastKnownCwd || runtime.initialCwd || process.cwd();
 }
 
 function getManagedSessionVersion(sessionId) {
@@ -966,6 +988,7 @@ module.exports = {
   killSession,
   listManagedSessions,
   hasManagedSession,
+  getManagedSessionCwd,
   getManagedSessionSnapshot,
   getManagedSessionsStatus,
   getManagedSessionVersion,

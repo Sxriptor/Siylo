@@ -1,7 +1,9 @@
 const http = require("node:http");
 const { appendLog, getSession, getStateSnapshot, setVoiceState } = require("./state");
 const { executeVoiceCommand } = require("./execution-engine");
+const gitService = require("./git-service");
 const {
+  getManagedSessionCwd,
   getManagedSessionSnapshot,
   getManagedSessionsStatus,
   getManagedSessionVersion,
@@ -252,6 +254,18 @@ async function handleRequest(request, response) {
     return;
   }
 
+  const gitRouteMatch = requestUrl.pathname.match(/^\/sessions\/([^/]+)\/git\/(status|log|commit|diff|tree|file|action)$/i);
+  if (gitRouteMatch) {
+    await handleGitRequest(
+      request,
+      response,
+      requestUrl,
+      decodeURIComponent(gitRouteMatch[1] || "").trim().toLowerCase(),
+      gitRouteMatch[2].toLowerCase()
+    );
+    return;
+  }
+
   const sessionRouteMatch = requestUrl.pathname.match(/^\/sessions\/([^/]+)\/(output|input|resize|kill)$/i);
   if (sessionRouteMatch) {
     const sessionId = decodeURIComponent(sessionRouteMatch[1] || "").trim().toLowerCase();
@@ -305,6 +319,61 @@ async function handleRequest(request, response) {
     error: "Not found.",
     status: "error"
   });
+}
+
+async function handleGitRequest(request, response, requestUrl, sessionId, routeType) {
+  if (!hasManagedSession(sessionId)) {
+    sendJson(response, 404, { error: `Session not found: ${sessionId}`, status: "error" });
+    return;
+  }
+
+  // The phone can point the panel at a different folder; otherwise follow the terminal.
+  const detectedCwd = getManagedSessionCwd(sessionId);
+  const requestedCwd = String(requestUrl.searchParams.get("cwd") || "").trim();
+  const cwd = requestedCwd && gitService.isDirectory(requestedCwd) ? requestedCwd : detectedCwd;
+  const params = requestUrl.searchParams;
+
+  try {
+    let result;
+    if (routeType === "status" && request.method === "GET") {
+      result = await gitService.getStatus(cwd);
+    } else if (routeType === "log" && request.method === "GET") {
+      result = await gitService.getLog(cwd, { all: params.get("all") === "1", limit: params.get("limit") });
+    } else if (routeType === "commit" && request.method === "GET") {
+      result = await gitService.getCommit(cwd, params.get("hash"));
+    } else if (routeType === "diff" && request.method === "GET") {
+      result = await gitService.getDiff(cwd, {
+        path: params.get("path") || "",
+        staged: params.get("staged") === "1",
+        untracked: params.get("untracked") === "1",
+        commit: params.get("commit") || ""
+      });
+    } else if (routeType === "tree" && request.method === "GET") {
+      result = await gitService.listDirectory(cwd, params.get("dir") || "");
+    } else if (routeType === "file" && request.method === "GET") {
+      result = await gitService.readProjectFile(cwd, params.get("path") || "");
+    } else if (routeType === "action" && request.method === "POST") {
+      const payload = await parseJsonRequest(request);
+      result = await gitService.runAction(cwd, payload);
+      appendLog(
+        result.ok ? "info" : "warn",
+        `Git ${result.action} in ${result.root} for ${sessionId}: ${result.steps.map((step) => step.command).join(" && ")}`
+      );
+    } else {
+      sendJson(response, 405, { error: "Method not allowed.", status: "error" });
+      return;
+    }
+
+    sendJson(response, 200, { status: "ok", sessionId, detectedCwd, ...result });
+  } catch (error) {
+    sendJson(response, error?.statusCode || 500, {
+      error: formatError(error),
+      status: "error",
+      sessionId,
+      detectedCwd,
+      cwd
+    });
+  }
 }
 
 async function parseVoiceRequest(request) {
